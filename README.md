@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/sfroment/pi-herdr/actions/workflows/ci.yml/badge.svg)](https://github.com/sfroment/pi-herdr/actions/workflows/ci.yml)
 [![Release](https://github.com/sfroment/pi-herdr/actions/workflows/release.yml/badge.svg)](https://github.com/sfroment/pi-herdr/actions/workflows/release.yml)
+[![Publish](https://github.com/sfroment/pi-herdr/actions/workflows/publish.yml/badge.svg)](https://github.com/sfroment/pi-herdr/actions/workflows/publish.yml)
+[![npm version](https://img.shields.io/npm/v/@sfroment/pi-herdr.svg?cacheSeconds=120)](https://www.npmjs.com/package/@sfroment/pi-herdr)
 [![GitHub Release](https://img.shields.io/github/v/release/sfroment/pi-herdr.svg?cacheSeconds=120)](https://github.com/sfroment/pi-herdr/releases)
 [![GitHub stars](https://img.shields.io/github/stars/sfroment/pi-herdr.svg?cacheSeconds=120)](https://github.com/sfroment/pi-herdr/stargazers)
 [![GitHub last commit](https://img.shields.io/github/last-commit/sfroment/pi-herdr.svg?cacheSeconds=120)](https://github.com/sfroment/pi-herdr/commits)
