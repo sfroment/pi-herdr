@@ -45,3 +45,10 @@ export function assertSafeCommand(params: HerdrParams): void {
 		}
 	}
 }
+
+export function formatOutput(stdout: string, stderr: string): string {
+	const chunks: string[] = [];
+	if (stdout.trim().length > 0) chunks.push(stdout.trimEnd());
+	if (stderr.trim().length > 0) chunks.push(`stderr:\n${stderr.trimEnd()}`);
+	return chunks.join("\n\n") || "(no output)";
+}

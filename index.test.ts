@@ -1,4 +1,4 @@
-import { assertSafeCommand, buildArgv } from "./index.ts";
+import { assertSafeCommand, buildArgv, formatOutput } from "./index.ts";
 import { describe, expect, test } from "bun:test";
 
 describe("buildArgv", () => {
@@ -92,5 +92,23 @@ describe("assertSafeCommand", () => {
 		expect(() =>
 			assertSafeCommand({ subcommand: "agent start reviewer" }),
 		).not.toThrow();
+	});
+});
+
+describe("formatOutput", () => {
+	test("1. stdout only", () => {
+		expect(formatOutput("hello", "")).toBe("hello");
+	});
+
+	test("2. stderr appended with label", () => {
+		expect(formatOutput("out", "err")).toBe("out\n\nstderr:\nerr");
+	});
+
+	test("3. empty produces placeholder", () => {
+		expect(formatOutput("", "")).toBe("(no output)");
+	});
+
+	test("4. whitespace-only is treated as empty", () => {
+		expect(formatOutput("   \n  ", "  ")).toBe("(no output)");
 	});
 });
