@@ -3,6 +3,7 @@ import {
 	buildArgv,
 	formatOutput,
 	runHerdr,
+	HERDR_GUIDANCE,
 	type ExecResult,
 	type HerdrExec,
 	type HerdrParams,
@@ -208,5 +209,23 @@ describe("runHerdr", () => {
 		const res = await runHerdr({ subcommand: "agent list" }, exec);
 		expect(res.details).toMatchObject({ truncated: true });
 		expect(res.content[0].text).toContain("Output truncated");
+	});
+});
+
+describe("HERDR_GUIDANCE", () => {
+	test("1. does not contain stale key=value format", () => {
+		expect(HERDR_GUIDANCE).not.toContain("key=value");
+	});
+
+	test("2. mentions HERDR_ENV", () => {
+		expect(HERDR_GUIDANCE).toContain("HERDR_ENV");
+	});
+
+	test("3. mentions forceDangerous", () => {
+		expect(HERDR_GUIDANCE).toContain("forceDangerous");
+	});
+
+	test("4. names the herdr tool explicitly", () => {
+		expect(HERDR_GUIDANCE).toContain("`herdr` tool");
 	});
 });

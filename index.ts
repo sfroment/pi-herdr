@@ -142,3 +142,86 @@ export async function runHerdr(
 		isError: code !== 0,
 	};
 }
+
+export const HERDR_GUIDANCE = `## Herdr CLI guidance
+
+The \`herdr\` tool wraps the Herdr CLI as a single typed tool. Pass the herdr subcommand as \`subcommand\` (e.g. 'agent list', 'pane split') and its flags as \`args\`. Booleans become bare flags (e.g. \`{ "no-focus": true }\` → \`--no-focus\`). Strings/numbers become \`--flag value\` pairs. Arrays become repeated \`--flag value\` pairs.
+
+Requires \`HERDR_ENV=1\` — the tool only works inside a Herdr-managed pane.
+
+Key patterns:
+- List agents: \`subcommand: "agent list"\`.
+- Split a pane: \`subcommand: "pane split"\`, \`args: { "--current": true, direction: "right", "no-focus": true }\`.
+- Start an agent: \`subcommand: "agent start reviewer"\`, \`args: { kind: "codex", pane: "w1:p2" }\`.
+- \`server stop\` requires \`forceDangerous: true\` and explicit user confirmation.
+
+Parse IDs from JSON responses. Do not close workspaces, tabs, or panes you did not create.`;
+
+const baseDir = dirname(fileURLToPath(import.meta.url));
+const skillPath = join(baseDir, "skill", "SKILL.md");
+
+const RELEVANT_PROMPT = /\b(herdr|pane|workspace|tab\b|terminal multiplexer|coordinate.*agent|control.*agent)\b/i;
+
+export default function herdrExtension(pi: ExtensionAPI) {
+	pi.on("resources_discover", () => ({
+		skillPaths: [skillPath],
+	}));
+
+	pi.on("before_agent_start", (event) => {
+		if (!RELEVANT_PROMPT.test(event.prompt)) return;
+		return {
+			systemPrompt: `${event.systemPrompt}\n\n${HERDR_GUIDANCE}\n`,
+		};
+	});
+
+	pi.registerTool({
+		name: "herdr",
+		label: "Herdr CLI",
+		description:
+			"Call the Herdr CLI to inspect and control workspaces, tabs, panes, and coding agents. " +
+			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list', 'pane split', 'workspace create') and its flags as `args`. " +
+			"Requires HERDR_ENV=1 (running inside a Herdr-managed pane). " +
+			"Destructive operations (server stop) require `forceDangerous: true`.",
+		promptSnippet:
+			"Control Herdr terminals, panes, workspaces, and agents via the herdr CLI.",
+		promptGuidelines: [
+			"Use the `herdr` tool when the user asks about Herdr — panes, workspaces, tabs, agents, or terminal layout. It calls the herdr CLI directly.",
+			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list') and its flags as `args`. Booleans become bare flags, arrays become repeated flags.",
+			"The `herdr` tool requires HERDR_ENV=1. If it reports not running inside Herdr, tell the user to run inside a Herdr-managed pane.",
+			"`server stop` requires `forceDangerous: true`. Always confirm with the user before using it.",
+			"Parse IDs from JSON responses. Do not close workspaces, tabs, or panes you did not create.",
+		],
+		parameters: Type.Object({
+			subcommand: Type.String({
+				description:
+					"The herdr CLI subcommand (e.g. 'agent list', 'pane split', 'workspace create'). Split on spaces into the command path.",
+			}),
+			args: Type.Optional(
+				Type.Record(
+					Type.String(),
+					Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Array(Type.String())]),
+					{
+						description:
+							"Command flags as a key/value map. Booleans become bare flags (e.g. {\"no-focus\": true} → --no-focus). Strings/numbers become --flag value pairs. Arrays become repeated --flag value pairs.",
+					},
+				),
+			),
+			timeoutSeconds: Type.Optional(
+				Type.Integer({
+					minimum: 1,
+					maximum: 120,
+					default: 30,
+					description: "Command timeout in seconds (default 30, max 120).",
+				}),
+			),
+			forceDangerous: Type.Optional(
+				Type.Boolean({
+					description: "Opt-in flag to allow destructive commands (server stop). Requires explicit user confirmation.",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params: HerdrParams, signal) {
+			return runHerdr(params, (cmd, args, opts) => pi.exec(cmd, args, opts), signal);
+		},
+	});
+}
