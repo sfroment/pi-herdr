@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { Type } from "typebox";
 
 export type HerdrParams = {
@@ -158,13 +159,29 @@ Key patterns:
 Parse IDs from JSON responses. Do not close workspaces, tabs, or panes you did not create.`;
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
-const skillPath = join(baseDir, "skill", "SKILL.md");
+const bundledSkillPath = join(baseDir, "skill", "SKILL.md");
+const liveSkillPath = join(baseDir, "skill", ".SKILL.live.md");
 
 const RELEVANT_PROMPT = /\b(herdr|pane|workspace|tab\b|terminal multiplexer|coordinate.*agent|control.*agent)\b/i;
 
 export default function herdrExtension(pi: ExtensionAPI) {
+	pi.on("session_start", async () => {
+		if (process.env.HERDR_ENV !== "1") return;
+		try {
+			const result = await pi.exec("herdr", ["--skill"], { timeout: 5000 });
+			const skill = (result.stdout ?? "").trim();
+			if (skill.length === 0) return;
+			mkdirSync(join(baseDir, "skill"), { recursive: true });
+			writeFileSync(liveSkillPath, skill);
+		} catch {
+			// Skill generation is best-effort; the bundled static copy is the fallback.
+		}
+	});
+
 	pi.on("resources_discover", () => ({
-		skillPaths: [skillPath],
+		// Prefer the live skill (generated from `herdr --skill` at session start); fall
+		// back to the bundled static copy so the extension still works outside Herdr.
+		skillPaths: [liveSkillPath, bundledSkillPath],
 	}));
 
 	pi.on("before_agent_start", (event) => {
