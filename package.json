@@ -1,23 +1,51 @@
 {
-  "name": "pi-herdr-extension",
-  "version": "1.0.0",
-  "description": "Pi extension wrapping the Herdr CLI as a single typed tool.",
-  "private": true,
+  "name": "@sfroment/pi-herdr",
+  "version": "0.1.0",
+  "description": "Pi extension for the Herdr CLI — control workspaces, tabs, panes, and coding agents via a typed tool (direct CLI, requires HERDR_ENV=1).",
+  "license": "GPL-3.0",
+  "author": "Sacha Froment <sacha.froment@mistral.ai>",
+  "homepage": "https://github.com/sfroment/pi-herdr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sfroment/pi-herdr.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sfroment/pi-herdr/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "herdr",
+    "terminal",
+    "multiplexer",
+    "cli"
+  ],
+  "files": [
+    "index.ts",
+    "skill/",
+    "scripts/link-pi-deps.sh",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "pi": {
     "extensions": ["./index.ts"]
   },
   "scripts": {
     "pretest": "./scripts/link-pi-deps.sh",
     "test": "bun test",
-    "test:watch": "bun test --watch"
-  },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^7.0.2"
+    "test:watch": "bun test --watch",
+    "prepublishOnly": "./scripts/link-pi-deps.sh && bun test"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "^0.83.0",
+    "@types/bun": "latest",
+    "typebox": "^1.3.9"
   }
 }
