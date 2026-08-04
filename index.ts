@@ -29,3 +29,19 @@ export function buildArgv(params: HerdrParams): string[] {
 
 	return argv;
 }
+
+const DANGEROUS_COMMANDS = ["server stop"];
+
+export function assertSafeCommand(params: HerdrParams): void {
+	const words = params.subcommand.trim().toLowerCase().split(/\s+/);
+	for (let i = 0; i < words.length - 1; i++) {
+		const pair = `${words[i]} ${words[i + 1]}`;
+		if (DANGEROUS_COMMANDS.includes(pair)) {
+			if (params.forceDangerous === true) return;
+			throw new Error(
+				`Refusing \`${pair}\` from the herdr tool — this operation is unrecoverable. ` +
+					"To override, set `forceDangerous: true` and confirm with the user first.",
+			);
+		}
+	}
+}

@@ -1,4 +1,4 @@
-import { buildArgv } from "./index.ts";
+import { assertSafeCommand, buildArgv } from "./index.ts";
 import { describe, expect, test } from "bun:test";
 
 describe("buildArgv", () => {
@@ -48,5 +48,49 @@ describe("buildArgv", () => {
 
 	test("9. whitespace-only subcommand throws", () => {
 		expect(() => buildArgv({ subcommand: "   " })).toThrow(/subcommand/i);
+	});
+});
+
+describe("assertSafeCommand", () => {
+	test("1. server stop refused without opt-in", () => {
+		expect(() => assertSafeCommand({ subcommand: "server stop" })).toThrow(/server stop/);
+	});
+
+	test("2. server stop with forceDangerous is allowed", () => {
+		expect(() =>
+			assertSafeCommand({ subcommand: "server stop", forceDangerous: true }),
+		).not.toThrow();
+	});
+
+	test("3. server stop with args is still refused", () => {
+		expect(() =>
+			assertSafeCommand({ subcommand: "server stop", args: { yes: true } }),
+		).toThrow(/server stop/);
+	});
+
+	test("4. safe command agent list is allowed", () => {
+		expect(() => assertSafeCommand({ subcommand: "agent list" })).not.toThrow();
+	});
+
+	test("5. safe command pane split is allowed", () => {
+		expect(() => assertSafeCommand({ subcommand: "pane split" })).not.toThrow();
+	});
+
+	test("6. dangerous command embedded in longer subcommand is caught", () => {
+		expect(() =>
+			assertSafeCommand({ subcommand: "run server stop" }),
+		).toThrow(/server stop/);
+	});
+
+	test("7. whitespace-padded dangerous command is caught", () => {
+		expect(() =>
+			assertSafeCommand({ subcommand: "  server stop  " }),
+		).toThrow(/server stop/);
+	});
+
+	test("8. safe command with extra words is allowed", () => {
+		expect(() =>
+			assertSafeCommand({ subcommand: "agent start reviewer" }),
+		).not.toThrow();
 	});
 });
