@@ -31,13 +31,29 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          for attempt in 1 2 3; do
+            if bun install --frozen-lockfile; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            echo "bun install failed; retrying in 5 seconds..."
+            sleep 5
+          done
 
       - name: Run tests
         run: bun test
 
       - name: Verify extension compiles
         run: bun build index.ts --no-bundle --outfile /tmp/pi-herdr-build.js
+
+      - name: Set version from release tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"  # e.g. v0.1.0-dev.42 or v0.1.0
+          VERSION="${TAG#v}"        # strip leading v
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
 
       - name: Check NPM_TOKEN is set
         if: ${{ env.NPM_TOKEN == '' }}
