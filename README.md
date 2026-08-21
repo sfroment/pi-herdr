@@ -105,7 +105,3 @@ Licensed under the [GNU General Public License v3.0](LICENSE).
 - **Author:** [Sacha Froment](https://sacha42.com)
 - **Source:** <https://github.com/sfroment/pi-herdr>
 - **Issues:** <https://github.com/sfroment/pi-herdr/issues>
-
-## Stargazers
-
-[![Stargazers over time](https://starchart.cc/sfroment/pi-herdr.svg?variant=dark)](https://starchart.cc/sfroment/pi-herdr)
