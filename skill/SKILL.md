@@ -43,6 +43,29 @@ Do not run bare `herdr` for discovery; it launches or attaches the TUI. Do not p
 
 Most control commands return JSON. Read identifiers and state from those responses instead of predicting them.
 
+### Full command surface (quick reference)
+
+The top-level command groups (run `herdr --help` via bash for the authoritative list):
+
+- `workspace <subcommand>` — create, list, switch, close, focus workspaces.
+- `tab <subcommand>` — create, list, switch, close, focus tabs within a workspace.
+- `pane <subcommand>` — split, list, switch, close, focus, send-keys, inspect panes.
+- `agent <subcommand>` — list, spawn, get, read, send, stop coding agents in panes.
+- `worktree <subcommand>` — git worktree helpers (create, switch, list, remove, merge).
+- `session <subcommand>` — manage named persistent sessions (attach, list, create, kill).
+- `notification <subcommand>` — notify panes/sessions of events.
+- `integration <subcommand>` — manage built-in agent integrations (pi, claude, codex, …).
+- `config <subcommand>` — inspect and edit config.toml (keybindings, theme, …).
+- `channel <subcommand>` — switch between stable/preview update channels.
+- `api <subcommand>` — inspect socket API metadata and live runtime state.
+- Bare `herdr` — launch or attach to the persistent session (the TUI).
+- `herdr status [server|client]` — show local client and running server status.
+- `herdr update [--handoff]` — download and install the latest version.
+- `herdr completion <shell>` — generate shell completions.
+- `herdr server stop` / `herdr server reload-config` — server lifecycle (stop requires `forceDangerous: true` on the pi tool).
+
+For any group, run `herdr <group>` (no subcommand) to see its subcommands and flags.
+
 ## Understand layout, panes, and agents
 
 Choose the primitive that matches the job:
