@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Pi extension for the Herdr CLI — control workspaces, tabs, panes, and coding agents via a typed tool (direct CLI, requires HERDR_ENV=1).",
   "license": "GPL-3.0",
-  "author": "Sacha Froment <sacha.froment@mistral.ai>",
+  "author": "Sacha Froment (https://sacha42.com)",
   "homepage": "https://github.com/sfroment/pi-herdr",
   "repository": {
     "type": "git",
@@ -25,8 +25,7 @@
     "skill/",
     "scripts/link-pi-deps.sh",
     "README.md",
-    "LICENSE",
-    "CHANGELOG.md"
+    "LICENSE"
   ],
   "pi": {
     "extensions": ["./index.ts"]

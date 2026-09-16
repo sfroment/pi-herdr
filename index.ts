@@ -65,6 +65,36 @@ export function formatOutput(stdout: string, stderr: string): string {
 	return chunks.join("\n\n") || "(no output)";
 }
 
+/**
+ * herdr's agent prompt/wait calls can report a client-side stall or timeout
+ * ("agent_prompt_stalled" from prompt, "timed out waiting for agent status"
+ * from wait) while the prompt WAS actually delivered — re-prompting on that
+ * false negative duplicates the task. Herdr's own guidance: verify the real
+ * state with `agent list`/`agent read` instead of re-sending.
+ */
+const PROMPT_FALSE_NEGATIVE = /agent_prompt_stalled|timed out waiting for agent status/i;
+
+/** Subcommands whose wait/prompt semantics make a false negative plausible. */
+const PROMPT_SUBCOMMAND = /^agent\s+(prompt|wait)\b/i;
+
+/**
+ * Wrap known-misleading herdr failures with recovery guidance so the caller
+ * does not re-prompt blindly. Returns null unless the command FAILED — a
+ * successful output that merely echoes the phrase (e.g. a transcript read
+ * while debugging this very extension) must not be misread as a failure.
+ */
+export function misleadingFailureGuidance(output: string, code: number | null | undefined): string | null {
+	if (code === 0 || code === null || code === undefined) return null;
+	if (!PROMPT_FALSE_NEGATIVE.test(output)) return null;
+	return (
+		"NOTE: this error does NOT mean the prompt failed — herdr often reports " +
+		"`agent_prompt_stalled` or a status timeout while the prompt was actually delivered. " +
+		"Do NOT re-send the prompt (it would duplicate the task). Verify the agent's real state " +
+		"with `agent list` / `agent read` first, and only re-prompt if the agent is idle and shows " +
+		"no sign of the task."
+	);
+}
+
 export type ExecResult = { stdout?: string; stderr?: string; code?: number | null; killed?: boolean };
 
 export type HerdrExec = (
@@ -97,7 +127,7 @@ export async function runHerdr(
 						"Not running inside Herdr (HERDR_ENV not set). The herdr tool only works inside a Herdr-managed pane.",
 				},
 			],
-			details: { subcommand: params.subcommand, notInHerdr: true },
+			details: { subcommand: params.subcommand.trim(), notInHerdr: true },
 			isError: true,
 		};
 	}
@@ -120,27 +150,48 @@ export async function runHerdr(
 	const code = result.code;
 
 	const output = formatOutput(stdout, stderr);
+	// A killed process never completed — pi.exec coerces a kill's null exit code
+	// to 0, so `code !== 0` alone would report a timeout-kill as success.
+	const failed = code !== 0 || result.killed === true;
+	// Gate on failure: a successful output that merely echoes the stall phrase
+	// (e.g. a transcript read) is NOT a misleading failure. Also treat an
+	// outer-exec kill on agent prompt/wait as the same class of false negative
+	// (the wait was cut short; the prompt may have been delivered anyway).
+	const subcommand = params.subcommand.trim();
+	const guidance = misleadingFailureGuidance(output, code)
+		?? (result.killed && PROMPT_SUBCOMMAND.test(subcommand)
+			? "NOTE: the outer command timeout killed this call — the prompt may still have " +
+				"been delivered. Do NOT re-send the prompt (it would duplicate the task). Verify with " +
+				"`agent list` / `agent read` first; for long waits pass `--timeout <ms>` (≤ 120000) in args " +
+				"and raise `timeoutSeconds` toward its 120s max."
+			: null);
 	const truncation = truncateTail(output, {
 		maxLines: DEFAULT_MAX_LINES,
 		maxBytes: DEFAULT_MAX_BYTES,
 	});
 	const commandLine = `herdr ${argv.join(" ")}`;
-	const codeText = code === null || code === undefined ? "unknown" : String(code);
+	// A killed result's exit code is a pi coercion artifact (null → 0) — render
+	// it as unknown so the output never claims a clean exit for a kill.
+	const codeText = result.killed || code === null || code === undefined ? "unknown" : String(code);
 	let text = `Command: ${commandLine}\nExit code: ${codeText}${result.killed ? " (killed)" : ""}\n\n${truncation.content}`;
 	if (truncation.truncated) {
 		text += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
+	}
+	if (guidance) {
+		text += `\n\n${guidance}`;
 	}
 
 	return {
 		content: [{ type: "text", text }],
 		details: {
-			subcommand: params.subcommand,
+			subcommand,
 			argv,
 			code,
 			killed: result.killed,
 			truncated: truncation.truncated,
+			misleadingFailure: guidance !== null,
 		},
-		isError: code !== 0,
+		isError: failed,
 	};
 }
 
@@ -153,7 +204,9 @@ Requires \`HERDR_ENV=1\` — the tool only works inside a Herdr-managed pane.
 Key patterns:
 - List agents: \`subcommand: "agent list"\`.
 - Split a pane: \`subcommand: "pane split"\`, \`args: { "--current": true, direction: "right", "no-focus": true }\`.
-- Start an agent: \`subcommand: "agent start reviewer"\`, \`args: { kind: "codex", pane: "w1:p2" }\`.
+- Start an agent: \`subcommand: "agent start reviewer"\`, \`args: { kind: "codex", pane: "w1:p2" }\`. The agent NAME is positional in the subcommand.
+- Prompt an agent: \`subcommand: "agent prompt <name> <text>"\` — text is positional too. \`agent prompt\` may report \`agent_prompt_stalled\` and \`agent wait\` a status timeout while the prompt WAS delivered — NEVER blindly re-prompt (duplicates the task); verify with \`agent list\` / \`agent read\` first.
+- herdr's own \`--timeout\` flags are in MILLISECONDS (e.g. \`--timeout 100000\`, max 120000 to fit the tool's exec cap): the tool's \`timeoutSeconds\` caps the outer exec at 120s — for long waits pass a per-command \`--timeout\` in args and keep \`timeoutSeconds\` at max.
 - \`server stop\` requires \`forceDangerous: true\` and explicit user confirmation.
 
 Parse IDs from JSON responses. Do not close workspaces, tabs, or panes you did not create.`;
@@ -203,8 +256,10 @@ export default function herdrExtension(pi: ExtensionAPI) {
 			"Control Herdr terminals, panes, workspaces, and agents via the herdr CLI.",
 		promptGuidelines: [
 			"Use the `herdr` tool when the user asks about Herdr — panes, workspaces, tabs, agents, or terminal layout. It calls the herdr CLI directly.",
-			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list') and its flags as `args`. Booleans become bare flags, arrays become repeated flags.",
+			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list') and its flags as `args`. Booleans become bare flags, arrays become repeated flags. Positional arguments (agent name, prompt text) go in the subcommand string.",
 			"The `herdr` tool requires HERDR_ENV=1. If it reports not running inside Herdr, tell the user to run inside a Herdr-managed pane.",
+			"`agent prompt` may report `agent_prompt_stalled` and `agent wait` a status timeout while the prompt was actually delivered — verify with `agent list`/`agent read` before re-prompting; re-prompting duplicates the task.",
+			"herdr's `--timeout` flags are milliseconds (max 120000 to fit the exec cap); the tool's `timeoutSeconds` caps the exec at 120s — for long agent waits pass `--timeout <ms>` in args.",
 			"`server stop` requires `forceDangerous: true`. Always confirm with the user before using it.",
 			"Parse IDs from JSON responses. Do not close workspaces, tabs, or panes you did not create.",
 		],
