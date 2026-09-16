@@ -152,6 +152,8 @@ herdr agent prompt reviewer "Review the current diff and report only actionable 
 
 A prompt sent from a non-working state must produce an observed lifecycle change within five seconds. Otherwise Herdr returns `agent_prompt_stalled` instead of waiting indefinitely. This wait tracks lifecycle state, not an individual turn; if the agent is already working, completion of the active turn may satisfy it.
 
+A stall or a `timed out waiting for agent status` error does **not** mean the prompt failed — the prompt is often delivered anyway. Verify the agent's real state with `agent list` / `agent read` before re-prompting; re-prompting duplicates the task.
+
 Use `--until` only for a state-specific workflow, such as waiting for an already-running agent to request input:
 
 ```bash

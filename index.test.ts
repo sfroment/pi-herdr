@@ -2,6 +2,7 @@ import {
 	assertSafeCommand,
 	buildArgv,
 	formatOutput,
+	misleadingFailureGuidance,
 	runHerdr,
 	HERDR_GUIDANCE,
 	type ExecResult,
@@ -132,6 +133,41 @@ function makeFakeExec(result: ExecResult): HerdrExec & { calls: Parameters<Herdr
 	return fn;
 }
 
+describe("misleadingFailureGuidance", () => {
+	test("agent_prompt_stalled output returns guidance", () => {
+		const g = misleadingFailureGuidance('{"code":"agent_prompt_stalled","error":"no observed working or blocked state within 5000 ms"}', 1);
+		expect(g).not.toBeNull();
+		expect(g).toContain("Do NOT re-send the prompt");
+		expect(g).toContain("agent list");
+	});
+
+	test("status timeout output returns guidance", () => {
+		const g = misleadingFailureGuidance("Error: timed out waiting for agent status", 1);
+		expect(g).not.toBeNull();
+		expect(g).toContain("duplicate the task");
+	});
+
+	test("normal output returns null", () => {
+		expect(misleadingFailureGuidance('{"agents":[]}', 1)).toBeNull();
+		expect(misleadingFailureGuidance("", 1)).toBeNull();
+	});
+
+	test("stall phrase with exit code 0 returns null (success is never a failure)", () => {
+		const transcript = "agent read output: previous error agent_prompt_stalled was observed";
+		expect(misleadingFailureGuidance(transcript, 0)).toBeNull();
+	});
+
+	test("near-miss phrases do not match", () => {
+		expect(misleadingFailureGuidance("the build stalled", 1)).toBeNull();
+		expect(misleadingFailureGuidance("timed out waiting for pane output", 1)).toBeNull();
+		expect(misleadingFailureGuidance("agent prompt stalled (no underscore code)", 1)).toBeNull();
+	});
+
+	test("unknown exit code returns null (conservative)", () => {
+		expect(misleadingFailureGuidance("Error: agent_prompt_stalled", null)).toBeNull();
+	});
+});
+
 describe("runHerdr", () => {
 	let originalHerdrEnv: string | undefined;
 
@@ -210,6 +246,91 @@ describe("runHerdr", () => {
 		expect(res.details).toMatchObject({ truncated: true });
 		expect(res.content[0].text).toContain("Output truncated");
 	});
+
+	test("9. agent_prompt_stalled failure appends do-not-reprompt guidance", async () => {
+		const exec = makeFakeExec({
+			stdout: "",
+			stderr: 'agent_prompt_stalled: no observed working or blocked state within 5000 ms',
+			code: 1,
+		});
+		const res = await runHerdr({ subcommand: "agent prompt reviewer do the thing" }, exec);
+		expect(res.isError).toBe(true);
+		expect(res.details).toMatchObject({ misleadingFailure: true });
+		expect(res.content[0].text).toContain("Do NOT re-send the prompt");
+		expect(res.content[0].text).toContain("agent list");
+	});
+
+	test("10. status-timeout failure appends the same guidance", async () => {
+		const exec = makeFakeExec({
+			stdout: 'Error: timed out waiting for agent status',
+			code: 1,
+		});
+		const res = await runHerdr({ subcommand: "agent prompt reviewer hi" }, exec);
+		expect(res.isError).toBe(true);
+		expect(res.details).toMatchObject({ misleadingFailure: true });
+		expect(res.content[0].text).toContain("Verify the agent's real state");
+	});
+
+	test("11. normal failure does not append misleading-failure guidance", async () => {
+		const exec = makeFakeExec({ stdout: "some other error", code: 1 });
+		const res = await runHerdr({ subcommand: "agent list" }, exec);
+		expect(res.isError).toBe(true);
+		expect(res.details.misleadingFailure).toBe(false);
+		expect(res.content[0].text).not.toContain("Do NOT re-send the prompt");
+		expect(res.content[0].text).not.toContain("NOTE: this error does NOT mean");
+	});
+
+	test("12. success whose output merely echoes the stall phrase gets no guidance", async () => {
+		const exec = makeFakeExec({
+			stdout: "transcript: ...previous agent_prompt_stalled error was logged here...",
+			code: 0,
+		});
+		const res = await runHerdr({ subcommand: "agent read reviewer" }, exec);
+		expect(res.isError).toBe(false);
+		expect(res.details.misleadingFailure).toBe(false);
+		expect(res.content[0].text).not.toContain("NOTE: this error does NOT mean");
+	});
+
+	test("13. outer-exec kill on agent prompt/wait appends guidance and is an error", async () => {
+		// Realistic pi.exec kill shape: the null exit code is coerced to 0.
+		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
+		const res = await runHerdr({ subcommand: "agent prompt reviewer do work" }, exec);
+		expect(res.isError).toBe(true);
+		expect(res.details.misleadingFailure).toBe(true);
+		expect(res.content[0].text).toContain("Exit code: unknown (killed)");
+		expect(res.content[0].text).toContain("prompt may still have been delivered");
+	});
+
+	test("14. outer-exec kill on a non-prompt command is an error but gets no guidance", async () => {
+		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
+		const res = await runHerdr({ subcommand: "pane read w1:p2" }, exec);
+		expect(res.isError).toBe(true);
+		expect(res.details.misleadingFailure).toBe(false);
+	});
+
+	test("15. detection fires even when the phrase lands in the truncated-away region", async () => {
+		// truncateTail keeps the LAST lines, so the phrase must be on the FIRST
+		// line to exercise the detect-before-truncate design.
+		const huge = "Error: agent_prompt_stalled at the very start\n"
+			+ Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
+		const exec = makeFakeExec({ stdout: huge, code: 1 });
+		const res = await runHerdr({ subcommand: "agent prompt reviewer hi" }, exec);
+		expect(res.details).toMatchObject({ truncated: true, misleadingFailure: true });
+		expect(res.content[0].text).not.toContain("at the very start");
+		expect(res.content[0].text).toContain("Do NOT re-send the prompt");
+	});
+
+	test("16. killed prompt/wait with leading-whitespace subcommand still gets guidance", async () => {
+		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
+		const res = await runHerdr({ subcommand: "  agent prompt reviewer hi" }, exec);
+		expect(res.details.misleadingFailure).toBe(true);
+		expect(res.details.subcommand).toBe("agent prompt reviewer hi");
+		expect(exec.calls[0][1]).toEqual(["agent", "prompt", "reviewer", "hi"]);
+	});
+
+	test("17. buildArgv trims whitespace-padded subcommands", () => {
+		expect(buildArgv({ subcommand: "  agent list  " })).toEqual(["agent", "list"]);
+	});
 });
 
 describe("HERDR_GUIDANCE", () => {
@@ -227,5 +348,15 @@ describe("HERDR_GUIDANCE", () => {
 
 	test("4. names the herdr tool explicitly", () => {
 		expect(HERDR_GUIDANCE).toContain("`herdr` tool");
+	});
+
+	test("5. documents millisecond --timeout flags with the 120000 cap", () => {
+		expect(HERDR_GUIDANCE).toContain("MILLISECONDS");
+		expect(HERDR_GUIDANCE).toContain("max 120000");
+	});
+
+	test("6. documents the do-not-reprompt stall semantics", () => {
+		expect(HERDR_GUIDANCE).toContain("agent_prompt_stalled");
+		expect(HERDR_GUIDANCE).toContain("NEVER blindly re-prompt");
 	});
 });
