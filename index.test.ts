@@ -193,6 +193,24 @@ describe("runHerdr", () => {
 		expect(res.content[0].text).toContain("Exit code: 0");
 	});
 
+	test("1b. timeoutSeconds 150 is clamped to 120s, not rejected", async () => {
+		const exec = makeFakeExec({ stdout: "[]", code: 0 });
+		await runHerdr({ subcommand: "agent list", timeoutSeconds: 150 }, exec);
+		expect(exec.calls[0][2].timeout).toBe(120000);
+	});
+
+	test("1c. timeoutSeconds 60000 is treated as milliseconds (60s)", async () => {
+		const exec = makeFakeExec({ stdout: "[]", code: 0 });
+		await runHerdr({ subcommand: "agent list", timeoutSeconds: 60000 }, exec);
+		expect(exec.calls[0][2].timeout).toBe(60000);
+	});
+
+	test("1d. timeoutSeconds 120000 ms coerces to the 120s cap", async () => {
+		const exec = makeFakeExec({ stdout: "[]", code: 0 });
+		await runHerdr({ subcommand: "agent list", timeoutSeconds: 120000 }, exec);
+		expect(exec.calls[0][2].timeout).toBe(120000);
+	});
+
 	test("2. success echoes command, exit code, and output", async () => {
 		const exec = makeFakeExec({ stdout: "agent-list-output", code: 0 });
 		const res = await runHerdr({ subcommand: "agent list" }, exec);

@@ -135,7 +135,11 @@ export async function runHerdr(
 	assertSafeCommand(params);
 
 	const argv = buildArgv(params);
-	const timeoutSeconds = Math.min(Math.max(params.timeoutSeconds ?? 30, 1), 120);
+	// Models echo herdr's CLI-style millisecond timeouts (--timeout 120000); a
+	// multiple of 1000 above the cap is read as ms, everything else clamps.
+	let timeoutSeconds = params.timeoutSeconds ?? 30;
+	if (timeoutSeconds > 120 && timeoutSeconds % 1000 === 0) timeoutSeconds = timeoutSeconds / 1000;
+	timeoutSeconds = Math.min(Math.max(timeoutSeconds, 1), 120);
 
 	let result: ExecResult;
 	try {
@@ -281,9 +285,9 @@ export default function herdrExtension(pi: ExtensionAPI) {
 			timeoutSeconds: Type.Optional(
 				Type.Integer({
 					minimum: 1,
-					maximum: 120,
 					default: 30,
-					description: "Command timeout in seconds (default 30, max 120).",
+					description:
+						"Command timeout in seconds (default 30, max 120). A multiple of 1000 above 120 is treated as milliseconds.",
 				}),
 			),
 			forceDangerous: Type.Optional(
