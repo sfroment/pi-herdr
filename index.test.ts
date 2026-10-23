@@ -120,6 +120,16 @@ describe("buildArgv", () => {
 		).toEqual(["agent", "start", "reviewer", "--kind", "pi"]);
 	});
 
+	test("16b. case-insensitive Agent Start still places positionals first", () => {
+		expect(
+			buildArgv({
+				subcommand: "Agent Start",
+				positional: ["reviewer"],
+				args: { kind: "pi" },
+			}),
+		).toEqual(["Agent", "Start", "reviewer", "--kind", "pi"]);
+	});
+
 	test("17. other agent subcommands keep the positionals-last default", () => {
 		expect(
 			buildArgv({ subcommand: "agent prompt", positional: ["reviewer", "hi"], args: { wait: true } }),

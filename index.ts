@@ -42,16 +42,16 @@ export function renderArgEntries(
 	return segment;
 }
 
-
 /**
- * Subcommands whose positionals must PRECEDE the flags, against the
+ * The subcommand whose positionals must PRECEDE the flags, against the
  * positionals-last default. herdr's parser does not reorder a leading
  * positional past flags when the subcommand also takes a trailing variadic
  * one: `agent start <NAME> --kind pi` parses, while `agent start --kind pi
  * <NAME>` draws the lossy `unknown option: pi` (exit 2 — the flag name is
- * lost, the flag's value is shown). Field-verified on herdr 0.9.5.
+ * lost, the flag's value is shown). Field-verified on herdr 0.9.5; grow this
+ * into a pattern table when a second such subcommand is verified.
  */
-const POSITIONALS_BEFORE_FLAGS = [/^agent\s+start$/i];
+const POSITIONALS_BEFORE_FLAGS = /^agent\s+start$/i;
 
 export function buildArgv(params: HerdrParams): string[] {
 	const trimmed = params.subcommand.trim();
@@ -64,10 +64,10 @@ export function buildArgv(params: HerdrParams): string[] {
 	const positional = params.positional ?? [];
 	// Positionals default to LAST: herdr parses trailing positionals, and a
 	// variadic one (e.g. `tab rename <TAB_ID> <LABEL>...`) captures everything
-	// after it, so flags must not trail. The table above names the subcommands
-	// whose positionals must lead instead. Each element is exactly one argv
-	// argument — no shell, no quoting, no re-splitting.
-	if (POSITIONALS_BEFORE_FLAGS.some((pattern) => pattern.test(trimmed))) {
+	// after it, so flags must not trail. POSITIONALS_BEFORE_FLAGS names the
+	// subcommand whose positionals must lead instead. Each element is exactly
+	// one argv argument — no shell, no quoting, no re-splitting.
+	if (POSITIONALS_BEFORE_FLAGS.test(trimmed)) {
 		return [...path, ...positional, ...flags];
 	}
 	return [...path, ...flags, ...positional];
