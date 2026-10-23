@@ -18,27 +18,39 @@ export type HerdrParams = {
 	forceDangerous?: boolean;
 };
 
+/**
+ * Render the args map as CLI flag tokens: booleans become bare flags, arrays
+ * become repeated --flag value pairs, false/null/undefined entries are omitted.
+ */
+export function renderArgEntries(
+	args: NonNullable<HerdrParams["args"]>,
+): string[] {
+	const segment: string[] = [];
+	for (const [key, value] of Object.entries(args)) {
+		if (value === false || value === null || value === undefined) continue;
+		const flag = key.startsWith("--") ? key : `--${key}`;
+		if (value === true) {
+			segment.push(flag);
+		} else if (Array.isArray(value)) {
+			for (const v of value) {
+				segment.push(flag, String(v));
+			}
+		} else {
+			segment.push(flag, String(value));
+		}
+	}
+	return segment;
+}
+
 export function buildArgv(params: HerdrParams): string[] {
 	const trimmed = params.subcommand.trim();
 	if (trimmed.length === 0) {
 		throw new Error("subcommand is required and must not be empty or whitespace");
 	}
 
-	const argv: string[] = trimmed.split(/\s+/);
-	const args = params.args ?? {};
-	for (const [key, value] of Object.entries(args)) {
-		if (value === false || value === null || value === undefined) continue;
-		const flag = key.startsWith("--") ? key : `--${key}`;
-		if (value === true) {
-			argv.push(flag);
-		} else if (Array.isArray(value)) {
-			for (const v of value) {
-				argv.push(flag, String(v));
-			}
-		} else {
-			argv.push(flag, String(value));
-		}
-	}
+	// The args map renders CLI-style: booleans become bare flags, arrays become
+	// repeated --flag value pairs, false/null/undefined are omitted.
+	const argv: string[] = [...trimmed.split(/\s+/), ...renderArgEntries(params.args ?? {})];
 	// Positionals go last: herdr parses trailing positionals, and a variadic one
 	// (e.g. `tab rename <TAB_ID> <LABEL>...`) captures everything after it, so
 	// flags must not trail. Each element is exactly one argv argument — no
@@ -159,6 +171,44 @@ export function failureRecoveryGuidance(ctx: FailureContext): string | null {
 	return null;
 }
 
+/**
+ * Models echo herdr's CLI-style millisecond timeouts (--timeout 120000): a
+ * multiple of 1000 above the cap is read as ms, everything else clamps to
+ * the 1..120s range.
+ */
+export function normalizeTimeoutSeconds(input: number | undefined): number {
+	let seconds = input ?? 30;
+	if (seconds > 120 && seconds % 1000 === 0) seconds = seconds / 1000;
+	return Math.min(Math.max(seconds, 1), 120);
+}
+
+/**
+ * Render the unified tool output: command line, exit code, truncated output,
+ * truncation note, and recovery guidance. A killed result's exit code is a
+ * pi coercion artifact (null → 0) — rendered as unknown so the output never
+ * claims a clean exit for a kill.
+ */
+export function renderResultText(
+	argv: string[],
+	output: string,
+	code: number | null | undefined,
+	killed: boolean,
+	guidance: string | null,
+): { text: string; truncated: boolean } {
+	const truncation = truncateTail(output, {
+		maxLines: DEFAULT_MAX_LINES,
+		maxBytes: DEFAULT_MAX_BYTES,
+	});
+	const codeText = killed || code === null || code === undefined ? "unknown" : String(code);
+	let text = `Command: herdr ${argv.join(" ")}\nExit code: ${codeText}${killed ? " (killed)" : ""}\n\n${truncation.content}`;
+	if (truncation.truncated) {
+		text += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
+	}
+	if (guidance) {
+		text += `\n\n${guidance}`;
+	}
+	return { text, truncated: truncation.truncated };
+}
 export type ExecResult = { stdout?: string; stderr?: string; code?: number | null; killed?: boolean };
 
 export type HerdrExec = (
@@ -199,11 +249,7 @@ export async function runHerdr(
 	assertSafeCommand(params);
 
 	const argv = buildArgv(params);
-	// Models echo herdr's CLI-style millisecond timeouts (--timeout 120000); a
-	// multiple of 1000 above the cap is read as ms, everything else clamps.
-	let timeoutSeconds = params.timeoutSeconds ?? 30;
-	if (timeoutSeconds > 120 && timeoutSeconds % 1000 === 0) timeoutSeconds = timeoutSeconds / 1000;
-	timeoutSeconds = Math.min(Math.max(timeoutSeconds, 1), 120);
+	const timeoutSeconds = normalizeTimeoutSeconds(params.timeoutSeconds);
 
 	let result: ExecResult;
 	try {
@@ -231,30 +277,16 @@ export async function runHerdr(
 		killed: result.killed === true,
 		subcommand,
 	});
-	const truncation = truncateTail(output, {
-		maxLines: DEFAULT_MAX_LINES,
-		maxBytes: DEFAULT_MAX_BYTES,
-	});
-	const commandLine = `herdr ${argv.join(" ")}`;
-	// A killed result's exit code is a pi coercion artifact (null → 0) — render
-	// it as unknown so the output never claims a clean exit for a kill.
-	const codeText = result.killed || code === null || code === undefined ? "unknown" : String(code);
-	let text = `Command: ${commandLine}\nExit code: ${codeText}${result.killed ? " (killed)" : ""}\n\n${truncation.content}`;
-	if (truncation.truncated) {
-		text += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
-	}
-	if (guidance) {
-		text += `\n\n${guidance}`;
-	}
+	const rendered = renderResultText(argv, output, code, result.killed === true, guidance);
 
 	return {
-		content: [{ type: "text", text }],
+		content: [{ type: "text", text: rendered.text }],
 		details: {
 			subcommand,
 			argv,
 			code,
 			killed: result.killed,
-			truncated: truncation.truncated,
+			truncated: rendered.truncated,
 			knownFailure: guidance !== null,
 		},
 		isError: failed,

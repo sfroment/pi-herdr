@@ -3,6 +3,8 @@ import {
 	buildArgv,
 	formatOutput,
 	failureRecoveryGuidance,
+	normalizeTimeoutSeconds,
+	renderResultText,
 	runHerdr,
 	HERDR_GUIDANCE,
 	type ExecResult,
@@ -287,6 +289,61 @@ describe("failureRecoveryGuidance", () => {
 
 	test("near-miss option phrases do not match", () => {
 		expect(failureRecoveryGuidance(ctx("unknown optional feature enabled", 1))).toBeNull();
+	});
+});
+describe("normalizeTimeoutSeconds", () => {
+	test("1. defaults to 30 when undefined", () => {
+		expect(normalizeTimeoutSeconds(undefined)).toBe(30);
+	});
+
+	test("2. ms-shaped multiple of 1000 above the cap converts to seconds", () => {
+		expect(normalizeTimeoutSeconds(60000)).toBe(60);
+	});
+
+	test("3. 120000 ms coerces to the 120s cap", () => {
+		expect(normalizeTimeoutSeconds(120000)).toBe(120);
+	});
+
+	test("4. plain values above the cap clamp to 120 (not read as ms)", () => {
+		expect(normalizeTimeoutSeconds(150)).toBe(120);
+	});
+
+	test("5. sub-second values clamp up to 1", () => {
+		expect(normalizeTimeoutSeconds(0)).toBe(1);
+		expect(normalizeTimeoutSeconds(-5)).toBe(1);
+	});
+});
+
+describe("renderResultText", () => {
+	test("1. echoes command line, exit code, and output", () => {
+		const r = renderResultText(["agent", "list"], "ok", 0, false, null);
+		expect(r.text).toContain("Command: herdr agent list");
+		expect(r.text).toContain("Exit code: 0");
+		expect(r.text).toContain("ok");
+		expect(r.truncated).toBe(false);
+	});
+
+	test("2. killed renders unknown exit code with (killed) marker", () => {
+		const r = renderResultText(["agent", "prompt"], "", 0, true, null);
+		expect(r.text).toContain("Exit code: unknown (killed)");
+	});
+
+	test("3. null exit code (no kill) also renders unknown", () => {
+		const r = renderResultText(["agent", "list"], "x", null, false, null);
+		expect(r.text).toContain("Exit code: unknown");
+		expect(r.text).not.toContain("(killed)");
+	});
+
+	test("4. guidance is appended after the output", () => {
+		const r = renderResultText(["agent", "list"], "out", 1, false, "RECOVERY NOTE");
+		expect(r.text).toContain("out\n\nRECOVERY NOTE");
+	});
+
+	test("5. huge output is truncated and the note is appended", () => {
+		const huge = Array.from({ length: 5000 }, () => "line of content").join("\n");
+		const r = renderResultText(["agent", "list"], huge, 0, false, null);
+		expect(r.truncated).toBe(true);
+		expect(r.text).toContain("Output truncated");
 	});
 });
 describe("runHerdr", () => {
