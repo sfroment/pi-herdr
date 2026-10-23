@@ -63,7 +63,8 @@ The `herdr` tool takes:
 | param | type | description |
 | --- | --- | --- |
 | `subcommand` | string (required) | CLI subcommand, e.g. `agent list`, `pane split`, `workspace create`. Split on spaces into the command path. |
-| `args` | object | Key/value flags. Booleans become bare flags (`{"no-focus": true}` → `--no-focus`). Strings/numbers become `--flag value` pairs. Arrays become repeated `--flag value` pairs. |
+| `args` | object | Key/value flags. Booleans become bare flags (`{"no-focus": true}` → `--no-focus`). Strings/numbers become `--flag value` pairs. Arrays become repeated `--flag value` pairs. Flags only — positional arguments go in `positional`. |
+| `positional` | string[] | Ordered positional arguments, appended after all flags. Each element becomes exactly one argv argument — no shell, no quoting, no re-splitting. |
 | `timeoutSeconds` | int | Default 30, max 120. |
 | `forceDangerous` | bool | Opt-in for destructive commands (`server stop`). Requires explicit user confirmation. |
 
@@ -81,6 +82,12 @@ The `herdr` tool takes:
 
 // read recent output from a pane
 { "subcommand": "pane read w1:p1", "args": { source: "recent-unwrapped", lines: 120 } }
+
+// send literal text to a pane — positionals, one argv element each
+{ "subcommand": "pane send-text", "positional": ["w1:p2", "echo hello"] }
+
+// prompt an agent with a multi-word brief
+{ "subcommand": "agent prompt", "positional": ["reviewer", "run the tests and report"] }
 ```
 
 ## Develop
