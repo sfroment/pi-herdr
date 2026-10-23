@@ -59,6 +59,35 @@ describe("buildArgv", () => {
 	test("9. whitespace-only subcommand throws", () => {
 		expect(() => buildArgv({ subcommand: "   " })).toThrow(/subcommand/i);
 	});
+
+	test("10. positional arguments are appended after flags, one argv element each", () => {
+		expect(
+			buildArgv({
+				subcommand: "pane send-text",
+				args: { raw: true },
+				positional: ["w3:p3", 'pi "run the tests"'],
+			}),
+		).toEqual(["pane", "send-text", "--raw", "w3:p3", 'pi "run the tests"']);
+	});
+
+	test("11. multi-word positional stays one argv element (no re-splitting)", () => {
+		expect(
+			buildArgv({ subcommand: "agent prompt", positional: ["reviewer", "run the tests"] }),
+		).toEqual(["agent", "prompt", "reviewer", "run the tests"]);
+	});
+
+	test("12. absent positional behaves as before", () => {
+		expect(buildArgv({ subcommand: "pane read", args: { lines: 50 } })).toEqual([
+			"pane",
+			"read",
+			"--lines",
+			"50",
+		]);
+	});
+
+	test("13. empty positional array behaves as before", () => {
+		expect(buildArgv({ subcommand: "pane read", positional: [] })).toEqual(["pane", "read"]);
+	});
 });
 
 describe("assertSafeCommand", () => {
@@ -101,6 +130,37 @@ describe("assertSafeCommand", () => {
 	test("8. safe command with extra words is allowed", () => {
 		expect(() =>
 			assertSafeCommand({ subcommand: "agent start reviewer" }),
+		).not.toThrow();
+	});
+
+	test("9. dangerous command smuggled through positional is caught", () => {
+		expect(() => assertSafeCommand({ subcommand: "server", positional: ["stop"] })).toThrow(
+			/server stop/,
+		);
+	});
+
+	test("10. positional-smuggled server stop with forceDangerous is allowed", () => {
+		expect(() =>
+			assertSafeCommand({ subcommand: "server", positional: ["stop"], forceDangerous: true }),
+		).not.toThrow();
+	});
+
+	test("11. flags between path and positional cannot smuggle server stop", () => {
+		expect(() =>
+			assertSafeCommand({
+				subcommand: "server",
+				args: { wait: true },
+				positional: ["stop"],
+			})
+		).toThrow(/server stop/);
+	});
+
+	test("12. multi-word payload as ONE positional does not false-positive", () => {
+		expect(() =>
+			assertSafeCommand({
+				subcommand: "pane send-text",
+				positional: ["w1:p1", "server stop"],
+			})
 		).not.toThrow();
 	});
 });
@@ -209,6 +269,16 @@ describe("runHerdr", () => {
 		const exec = makeFakeExec({ stdout: "[]", code: 0 });
 		await runHerdr({ subcommand: "agent list", timeoutSeconds: 120000 }, exec);
 		expect(exec.calls[0][2].timeout).toBe(120000);
+	});
+
+	test("1e. positional arguments reach exec as ordered trailing argv", async () => {
+		const exec = makeFakeExec({ stdout: "{}", code: 0 });
+		const res = await runHerdr(
+			{ subcommand: "agent prompt", positional: ["reviewer", "run the tests"] },
+			exec,
+		);
+		expect(exec.calls[0][1]).toEqual(["agent", "prompt", "reviewer", "run the tests"]);
+		expect(res.content[0].text).toContain("Command: herdr agent prompt reviewer run the tests");
 	});
 
 	test("2. success echoes command, exit code, and output", async () => {
@@ -376,5 +446,11 @@ describe("HERDR_GUIDANCE", () => {
 	test("6. documents the do-not-reprompt stall semantics", () => {
 		expect(HERDR_GUIDANCE).toContain("agent_prompt_stalled");
 		expect(HERDR_GUIDANCE).toContain("NEVER blindly re-prompt");
+	});
+
+	test("7. documents the positional channel and its one-element-one-argv contract", () => {
+		expect(HERDR_GUIDANCE).toContain("positional");
+		expect(HERDR_GUIDANCE).toContain("ONE argv argument");
+		expect(HERDR_GUIDANCE).toContain("NEVER put positional text in \`args\`");
 	});
 });

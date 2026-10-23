@@ -13,6 +13,7 @@ import { Type } from "typebox";
 export type HerdrParams = {
 	subcommand: string;
 	args?: Record<string, string | number | boolean | string[] | null | undefined>;
+	positional?: string[];
 	timeoutSeconds?: number;
 	forceDangerous?: boolean;
 };
@@ -38,6 +39,13 @@ export function buildArgv(params: HerdrParams): string[] {
 			argv.push(flag, String(value));
 		}
 	}
+	// Positionals go last: herdr parses trailing positionals, and a variadic one
+	// (e.g. `tab rename <TAB_ID> <LABEL>...`) captures everything after it, so
+	// flags must not trail. Each element is exactly one argv argument — no
+	// shell, no quoting, no re-splitting.
+	for (const value of params.positional ?? []) {
+		argv.push(value);
+	}
 
 	return argv;
 }
@@ -45,7 +53,14 @@ export function buildArgv(params: HerdrParams): string[] {
 const DANGEROUS_COMMANDS = ["server stop"];
 
 export function assertSafeCommand(params: HerdrParams): void {
-	const words = params.subcommand.trim().toLowerCase().split(/\s+/);
+	// Positionals join the pair-scan: clap reorders flags around positionals, so
+	// scanning the path alone would let `subcommand: "server", positional: ["stop"]`
+	// reach the unrecoverable command. Each positional stays ONE word here — a
+	// multi-word payload never forms a dangerous pair (it is one argv element).
+	const words = [
+		...params.subcommand.trim().toLowerCase().split(/\s+/),
+		...(params.positional ?? []).map((word) => word.toLowerCase()),
+	];
 	for (let i = 0; i < words.length - 1; i++) {
 		const pair = `${words[i]} ${words[i + 1]}`;
 		if (DANGEROUS_COMMANDS.includes(pair)) {
@@ -208,8 +223,9 @@ Requires \`HERDR_ENV=1\` — the tool only works inside a Herdr-managed pane.
 Key patterns:
 - List agents: \`subcommand: "agent list"\`.
 - Split a pane: \`subcommand: "pane split"\`, \`args: { "--current": true, direction: "right", "no-focus": true }\`.
-- Start an agent: \`subcommand: "agent start reviewer"\`, \`args: { kind: "codex", pane: "w1:p2" }\`. The agent NAME is positional in the subcommand.
-- Prompt an agent: \`subcommand: "agent prompt <name> <text>"\` — text is positional too. \`agent prompt\` may report \`agent_prompt_stalled\` and \`agent wait\` a status timeout while the prompt WAS delivered — NEVER blindly re-prompt (duplicates the task); verify with \`agent list\` / \`agent read\` first.
+- Positional arguments (pane ids, agent names, prompt texts, labels): pass them as \`positional: ["w3:p3", 'pi "run the tests"']\` — each array element becomes exactly ONE argv argument, appended after all flags. NEVER put positional text in \`args\` (it would become a literal \`--flag\` typed into the pane) and never bake multi-word text into \`subcommand\` (it gets split on spaces).
+- Start an agent: \`subcommand: "agent start"\`, \`positional: ["reviewer"]\`, \`args: { kind: "codex", pane: "w1:p2" }\`.
+- Prompt an agent: \`subcommand: "agent prompt"\`, \`positional: ["reviewer", "the prompt text"]\`. \`agent prompt\` may report \`agent_prompt_stalled\` and \`agent wait\` a status timeout while the prompt WAS delivered — NEVER blindly re-prompt (duplicates the task); verify with \`agent list\` / \`agent read\` first.
 - herdr's own \`--timeout\` flags are in MILLISECONDS (e.g. \`--timeout 100000\`, max 120000 to fit the tool's exec cap): the tool's \`timeoutSeconds\` caps the outer exec at 120s — for long waits pass a per-command \`--timeout\` in args and keep \`timeoutSeconds\` at max.
 - \`server stop\` requires \`forceDangerous: true\` and explicit user confirmation.
 
@@ -253,14 +269,16 @@ export default function herdrExtension(pi: ExtensionAPI) {
 		label: "Herdr CLI",
 		description:
 			"Call the Herdr CLI to inspect and control workspaces, tabs, panes, and coding agents. " +
-			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list', 'pane split', 'workspace create') and its flags as `args`. " +
+			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list', 'pane split', 'workspace create'), its flags as `args`, " +
+			"and its ordered positional arguments (pane ids, prompt texts, labels) as `positional` — each element becomes exactly one argv argument. " +
 			"Requires HERDR_ENV=1 (running inside a Herdr-managed pane). " +
 			"Destructive operations (server stop) require `forceDangerous: true`.",
 		promptSnippet:
 			"Control Herdr terminals, panes, workspaces, and agents via the herdr CLI.",
 		promptGuidelines: [
 			"Use the `herdr` tool when the user asks about Herdr — panes, workspaces, tabs, agents, or terminal layout. It calls the herdr CLI directly.",
-			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list') and its flags as `args`. Booleans become bare flags, arrays become repeated flags. Positional arguments (agent name, prompt text) go in the subcommand string.",
+			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list') and its flags as `args`. Booleans become bare flags, arrays become repeated flags.",
+			"Pass ordered positional arguments (pane ids, agent names, prompt texts, labels) as `positional: [\"w3:p3\", \"the text\"]` — each element is exactly one argv argument, appended after flags. Never put positional text in `args` (it becomes a literal flag) or in `subcommand` (multi-word text gets split).",
 			"The `herdr` tool requires HERDR_ENV=1. If it reports not running inside Herdr, tell the user to run inside a Herdr-managed pane.",
 			"`agent prompt` may report `agent_prompt_stalled` and `agent wait` a status timeout while the prompt was actually delivered — verify with `agent list`/`agent read` before re-prompting; re-prompting duplicates the task.",
 			"herdr's `--timeout` flags are milliseconds (max 120000 to fit the exec cap); the tool's `timeoutSeconds` caps the exec at 120s — for long agent waits pass `--timeout <ms>` in args.",
@@ -278,9 +296,17 @@ export default function herdrExtension(pi: ExtensionAPI) {
 					Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Array(Type.String())]),
 					{
 						description:
-							"Command flags as a key/value map. Booleans become bare flags (e.g. {\"no-focus\": true} → --no-focus). Strings/numbers become --flag value pairs. Arrays become repeated --flag value pairs.",
+							"Command flags as a key/value map. Booleans become bare flags (e.g. {\"no-focus\": true} → --no-focus). Strings/numbers become --flag value pairs. Arrays become repeated --flag value pairs. Flags only — positional arguments go in `positional`.",
 					},
 				),
+			),
+			positional: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Ordered positional arguments, appended after all flags (e.g. [\"w3:p3\", 'pi \"run the tests\"'] for `pane send-text`). " +
+						"Each element becomes exactly one argv argument — no shell, no quoting, no re-splitting. " +
+						"Use for commands like `agent prompt <name> <text>`, `pane send-text <id> <text>`, `pane read <id>`, `tab rename <id> <label>`.",
+				}),
 			),
 			timeoutSeconds: Type.Optional(
 				Type.Integer({
