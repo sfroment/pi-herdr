@@ -91,6 +91,50 @@ describe("buildArgv", () => {
 	test("13. empty positional array behaves as before", () => {
 		expect(buildArgv({ subcommand: "pane read", positional: [] })).toEqual(["pane", "read"]);
 	});
+
+	test("14. agent start places positionals BEFORE flags (herdr parses NAME first)", () => {
+		expect(
+			buildArgv({
+				subcommand: "agent start",
+				positional: ["reviewer"],
+				args: { kind: "pi", pane: "w1:p2" },
+			}),
+		).toEqual(["agent", "start", "reviewer", "--kind", "pi", "--pane", "w1:p2"]);
+	});
+
+	test("15. agent start with no flags keeps the plain command path + positional", () => {
+		expect(buildArgv({ subcommand: "agent start", positional: ["reviewer"] })).toEqual([
+			"agent",
+			"start",
+			"reviewer",
+		]);
+	});
+
+	test("16. whitespace-padded agent start still places positionals first", () => {
+		expect(
+			buildArgv({
+				subcommand: "  agent  start  ",
+				positional: ["reviewer"],
+				args: { kind: "pi" },
+			}),
+		).toEqual(["agent", "start", "reviewer", "--kind", "pi"]);
+	});
+
+	test("16b. case-insensitive Agent Start still places positionals first", () => {
+		expect(
+			buildArgv({
+				subcommand: "Agent Start",
+				positional: ["reviewer"],
+				args: { kind: "pi" },
+			}),
+		).toEqual(["Agent", "Start", "reviewer", "--kind", "pi"]);
+	});
+
+	test("17. other agent subcommands keep the positionals-last default", () => {
+		expect(
+			buildArgv({ subcommand: "agent prompt", positional: ["reviewer", "hi"], args: { wait: true } }),
+		).toEqual(["agent", "prompt", "--wait", "reviewer", "hi"]);
+	});
 });
 
 describe("assertSafeCommand", () => {
@@ -352,6 +396,10 @@ describe("normalizeTimeoutSeconds", () => {
 		expect(normalizeTimeoutSeconds(150)).toBe(120);
 	});
 
+	test("4b. the 120s cap itself is a valid plain value, not ms-shaped", () => {
+		expect(normalizeTimeoutSeconds(120)).toBe(120);
+	});
+
 	test("5. sub-second values clamp up to 1", () => {
 		expect(normalizeTimeoutSeconds(0)).toBe(1);
 		expect(normalizeTimeoutSeconds(-5)).toBe(1);
@@ -442,6 +490,23 @@ describe("runHerdr", () => {
 		);
 		expect(exec.calls[0][1]).toEqual(["agent", "prompt", "reviewer", "run the tests"]);
 		expect(res.content[0].text).toContain("Command: herdr agent prompt reviewer run the tests");
+	});
+
+	test("1f. agent start argv places the NAME positional before flags", async () => {
+		const exec = makeFakeExec({ stdout: "{}", code: 0 });
+		await runHerdr(
+			{ subcommand: "agent start", positional: ["reviewer"], args: { kind: "pi", pane: "w1:p2" } },
+			exec,
+		);
+		expect(exec.calls[0][1]).toEqual([
+			"agent",
+			"start",
+			"reviewer",
+			"--kind",
+			"pi",
+			"--pane",
+			"w1:p2",
+		]);
 	});
 
 	test("2. success echoes command, exit code, and output", async () => {
@@ -648,5 +713,10 @@ describe("HERDR_GUIDANCE", () => {
 		expect(HERDR_GUIDANCE).toContain("positional");
 		expect(HERDR_GUIDANCE).toContain("ONE argv argument");
 		expect(HERDR_GUIDANCE).toContain("NEVER put positional text in \`args\`");
+	});
+
+	test("8. documents per-subcommand placement (agent start NAME leads)", () => {
+		expect(HERDR_GUIDANCE).toContain("where the CLI parses them");
+		expect(HERDR_GUIDANCE).toContain("BEFORE flags for \`agent start\`");
 	});
 });
