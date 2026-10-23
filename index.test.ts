@@ -2,7 +2,7 @@ import {
 	assertSafeCommand,
 	buildArgv,
 	formatOutput,
-	misleadingFailureGuidance,
+	failureRecoveryGuidance,
 	runHerdr,
 	HERDR_GUIDANCE,
 	type ExecResult,
@@ -193,41 +193,62 @@ function makeFakeExec(result: ExecResult): HerdrExec & { calls: Parameters<Herdr
 	return fn;
 }
 
-describe("misleadingFailureGuidance", () => {
+describe("failureRecoveryGuidance", () => {
+	// Minimal honest context: the seam's type requires every field.
+	function ctx(
+		output: string,
+		code: number | null,
+		overrides: { killed?: boolean; subcommand?: string } = {},
+	) {
+		return { output, code, killed: false, subcommand: "agent prompt reviewer hi", ...overrides };
+	}
+
 	test("agent_prompt_stalled output returns guidance", () => {
-		const g = misleadingFailureGuidance('{"code":"agent_prompt_stalled","error":"no observed working or blocked state within 5000 ms"}', 1);
+		const g = failureRecoveryGuidance(
+			ctx('{"code":"agent_prompt_stalled","error":"no observed working or blocked state within 5000 ms"}', 1),
+		);
 		expect(g).not.toBeNull();
 		expect(g).toContain("Do NOT re-send the prompt");
 		expect(g).toContain("agent list");
 	});
 
 	test("status timeout output returns guidance", () => {
-		const g = misleadingFailureGuidance("Error: timed out waiting for agent status", 1);
+		const g = failureRecoveryGuidance(ctx("Error: timed out waiting for agent status", 1));
 		expect(g).not.toBeNull();
 		expect(g).toContain("duplicate the task");
 	});
 
 	test("normal output returns null", () => {
-		expect(misleadingFailureGuidance('{"agents":[]}', 1)).toBeNull();
-		expect(misleadingFailureGuidance("", 1)).toBeNull();
+		expect(failureRecoveryGuidance(ctx('{"agents":[]}', 1))).toBeNull();
+		expect(failureRecoveryGuidance(ctx("", 1))).toBeNull();
 	});
 
 	test("stall phrase with exit code 0 returns null (success is never a failure)", () => {
 		const transcript = "agent read output: previous error agent_prompt_stalled was observed";
-		expect(misleadingFailureGuidance(transcript, 0)).toBeNull();
+		expect(failureRecoveryGuidance(ctx(transcript, 0))).toBeNull();
 	});
 
 	test("near-miss phrases do not match", () => {
-		expect(misleadingFailureGuidance("the build stalled", 1)).toBeNull();
-		expect(misleadingFailureGuidance("timed out waiting for pane output", 1)).toBeNull();
-		expect(misleadingFailureGuidance("agent prompt stalled (no underscore code)", 1)).toBeNull();
+		expect(failureRecoveryGuidance(ctx("the build stalled", 1))).toBeNull();
+		expect(failureRecoveryGuidance(ctx("timed out waiting for pane output", 1))).toBeNull();
+		expect(failureRecoveryGuidance(ctx("agent prompt stalled (no underscore code)", 1))).toBeNull();
 	});
 
 	test("unknown exit code returns null (conservative)", () => {
-		expect(misleadingFailureGuidance("Error: agent_prompt_stalled", null)).toBeNull();
+		expect(failureRecoveryGuidance(ctx("Error: agent_prompt_stalled", null))).toBeNull();
+	});
+
+	test("killed prompt/wait returns guidance (a kill bypasses the exit-code gate)", () => {
+		const g = failureRecoveryGuidance(ctx("", 0, { killed: true, subcommand: "agent wait reviewer" }));
+		expect(g).not.toBeNull();
+		expect(g).toContain("may still have been delivered");
+		expect(g).toContain("Do NOT re-send the prompt");
+	});
+
+	test("killed non-prompt command returns null", () => {
+		expect(failureRecoveryGuidance(ctx("", 0, { killed: true, subcommand: "pane read w1:p2" }))).toBeNull();
 	});
 });
-
 describe("runHerdr", () => {
 	let originalHerdrEnv: string | undefined;
 
@@ -343,7 +364,7 @@ describe("runHerdr", () => {
 		});
 		const res = await runHerdr({ subcommand: "agent prompt reviewer do the thing" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details).toMatchObject({ misleadingFailure: true });
+		expect(res.details).toMatchObject({ knownFailure: true });
 		expect(res.content[0].text).toContain("Do NOT re-send the prompt");
 		expect(res.content[0].text).toContain("agent list");
 	});
@@ -355,7 +376,7 @@ describe("runHerdr", () => {
 		});
 		const res = await runHerdr({ subcommand: "agent prompt reviewer hi" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details).toMatchObject({ misleadingFailure: true });
+		expect(res.details).toMatchObject({ knownFailure: true });
 		expect(res.content[0].text).toContain("Verify the agent's real state");
 	});
 
@@ -363,7 +384,7 @@ describe("runHerdr", () => {
 		const exec = makeFakeExec({ stdout: "some other error", code: 1 });
 		const res = await runHerdr({ subcommand: "agent list" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details.misleadingFailure).toBe(false);
+		expect(res.details.knownFailure).toBe(false);
 		expect(res.content[0].text).not.toContain("Do NOT re-send the prompt");
 		expect(res.content[0].text).not.toContain("NOTE: this error does NOT mean");
 	});
@@ -375,7 +396,7 @@ describe("runHerdr", () => {
 		});
 		const res = await runHerdr({ subcommand: "agent read reviewer" }, exec);
 		expect(res.isError).toBe(false);
-		expect(res.details.misleadingFailure).toBe(false);
+		expect(res.details.knownFailure).toBe(false);
 		expect(res.content[0].text).not.toContain("NOTE: this error does NOT mean");
 	});
 
@@ -384,7 +405,7 @@ describe("runHerdr", () => {
 		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
 		const res = await runHerdr({ subcommand: "agent prompt reviewer do work" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details.misleadingFailure).toBe(true);
+		expect(res.details.knownFailure).toBe(true);
 		expect(res.content[0].text).toContain("Exit code: unknown (killed)");
 		expect(res.content[0].text).toContain("prompt may still have been delivered");
 	});
@@ -393,7 +414,7 @@ describe("runHerdr", () => {
 		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
 		const res = await runHerdr({ subcommand: "pane read w1:p2" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details.misleadingFailure).toBe(false);
+		expect(res.details.knownFailure).toBe(false);
 	});
 
 	test("15. detection fires even when the phrase lands in the truncated-away region", async () => {
@@ -403,7 +424,7 @@ describe("runHerdr", () => {
 			+ Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
 		const exec = makeFakeExec({ stdout: huge, code: 1 });
 		const res = await runHerdr({ subcommand: "agent prompt reviewer hi" }, exec);
-		expect(res.details).toMatchObject({ truncated: true, misleadingFailure: true });
+		expect(res.details).toMatchObject({ truncated: true, knownFailure: true });
 		expect(res.content[0].text).not.toContain("at the very start");
 		expect(res.content[0].text).toContain("Do NOT re-send the prompt");
 	});
@@ -411,7 +432,7 @@ describe("runHerdr", () => {
 	test("16. killed prompt/wait with leading-whitespace subcommand still gets guidance", async () => {
 		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
 		const res = await runHerdr({ subcommand: "  agent prompt reviewer hi" }, exec);
-		expect(res.details.misleadingFailure).toBe(true);
+		expect(res.details.knownFailure).toBe(true);
 		expect(res.details.subcommand).toBe("agent prompt reviewer hi");
 		expect(exec.calls[0][1]).toEqual(["agent", "prompt", "reviewer", "hi"]);
 	});

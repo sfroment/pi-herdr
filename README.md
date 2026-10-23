@@ -102,7 +102,7 @@ bun install
 bun test
 ```
 
-The tests mock only the system boundary (`pi.exec`) via dependency injection — `runHerdr(params, exec)` takes the exec function as a parameter, so tests pass a fake that records argv and returns canned results. Internal helpers (`buildArgv`, `assertSafeCommand`, `formatOutput`) are pure and tested directly.
+The tests mock only the system boundary (`pi.exec`) via dependency injection — `runHerdr(params, exec)` takes the exec function as a parameter, so tests pass a fake that records argv and returns canned results. Internal helpers (`buildArgv`, `assertSafeCommand`, `formatOutput`, `failureRecoveryGuidance`) are pure and tested directly.
 
 The `pretest` script (`scripts/link-pi-deps.sh`) symlinks the pi runtime packages (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `typebox`) into `node_modules/` so Bun can resolve the extension's imports during tests.
 

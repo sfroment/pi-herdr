@@ -92,22 +92,51 @@ const PROMPT_FALSE_NEGATIVE = /agent_prompt_stalled|timed out waiting for agent 
 /** Subcommands whose wait/prompt semantics make a false negative plausible. */
 const PROMPT_SUBCOMMAND = /^agent\s+(prompt|wait)\b/i;
 
+const STALL_GUIDANCE =
+	"NOTE: this error does NOT mean the prompt failed — herdr often reports " +
+	"`agent_prompt_stalled` or a status timeout while the prompt was actually delivered. " +
+	"Do NOT re-send the prompt (it would duplicate the task). Verify the agent's real state " +
+	"with `agent list` / `agent read` first, and only re-prompt if the agent is idle and shows " +
+	"no sign of the task.";
+
+const KILLED_PROMPT_GUIDANCE =
+	"NOTE: the outer command timeout killed this call — the prompt may still have " +
+	"been delivered. Do NOT re-send the prompt (it would duplicate the task). Verify with " +
+	"`agent list` / `agent read` first; for long waits pass `--timeout <ms>` (≤ 120000) in args " +
+	"and raise `timeoutSeconds` toward its 120s max.";
+
 /**
- * Wrap known-misleading herdr failures with recovery guidance so the caller
- * does not re-prompt blindly. Returns null unless the command FAILED — a
- * successful output that merely echoes the phrase (e.g. a transcript read
- * while debugging this very extension) must not be misread as a failure.
+ * Known herdr failure shapes and their field-verified recoveries, one rule per
+ * shape. This table is the single place wrapper-vs-CLI quirk knowledge lives.
  */
-export function misleadingFailureGuidance(output: string, code: number | null | undefined): string | null {
-	if (code === 0 || code === null || code === undefined) return null;
-	if (!PROMPT_FALSE_NEGATIVE.test(output)) return null;
-	return (
-		"NOTE: this error does NOT mean the prompt failed — herdr often reports " +
-		"`agent_prompt_stalled` or a status timeout while the prompt was actually delivered. " +
-		"Do NOT re-send the prompt (it would duplicate the task). Verify the agent's real state " +
-		"with `agent list` / `agent read` first, and only re-prompt if the agent is idle and shows " +
-		"no sign of the task."
-	);
+const FAILURE_RULES: { pattern: RegExp; guidance: string }[] = [
+	{ pattern: PROMPT_FALSE_NEGATIVE, guidance: STALL_GUIDANCE },
+];
+
+/** Everything the seam needs to classify one execution's outcome. */
+export type FailureContext = {
+	output: string;
+	code: number | null | undefined;
+	killed: boolean;
+	subcommand: string;
+};
+
+/**
+ * Recovery guidance for known herdr failure shapes — misleading or not — so
+ * callers do not burn round-trips on blind retries or wrong workarounds.
+ * Returns null unless the command FAILED: a successful output that merely
+ * echoes a known phrase (e.g. a transcript read while debugging this very
+ * extension) must not be misread as a failure. A killed process never
+ * completed either — pi.exec coerces a kill's null exit code to 0, so the
+ * killed check bypasses the exit-code gate.
+ */
+export function failureRecoveryGuidance(ctx: FailureContext): string | null {
+	if (ctx.killed && PROMPT_SUBCOMMAND.test(ctx.subcommand)) return KILLED_PROMPT_GUIDANCE;
+	if (ctx.code === 0 || ctx.code === null || ctx.code === undefined) return null;
+	for (const rule of FAILURE_RULES) {
+		if (rule.pattern.test(ctx.output)) return rule.guidance;
+	}
+	return null;
 }
 
 export type ExecResult = { stdout?: string; stderr?: string; code?: number | null; killed?: boolean };
@@ -172,18 +201,16 @@ export async function runHerdr(
 	// A killed process never completed — pi.exec coerces a kill's null exit code
 	// to 0, so `code !== 0` alone would report a timeout-kill as success.
 	const failed = code !== 0 || result.killed === true;
-	// Gate on failure: a successful output that merely echoes the stall phrase
-	// (e.g. a transcript read) is NOT a misleading failure. Also treat an
-	// outer-exec kill on agent prompt/wait as the same class of false negative
-	// (the wait was cut short; the prompt may have been delivered anyway).
+	// Known failure shapes (misleading or not) carry their recovery text in one
+	// table behind failureRecoveryGuidance; the seam gates on failure so a
+	// success that merely echoes a known phrase is never misread.
 	const subcommand = params.subcommand.trim();
-	const guidance = misleadingFailureGuidance(output, code)
-		?? (result.killed && PROMPT_SUBCOMMAND.test(subcommand)
-			? "NOTE: the outer command timeout killed this call — the prompt may still have " +
-				"been delivered. Do NOT re-send the prompt (it would duplicate the task). Verify with " +
-				"`agent list` / `agent read` first; for long waits pass `--timeout <ms>` (≤ 120000) in args " +
-				"and raise `timeoutSeconds` toward its 120s max."
-			: null);
+	const guidance = failureRecoveryGuidance({
+		output,
+		code,
+		killed: result.killed === true,
+		subcommand,
+	});
 	const truncation = truncateTail(output, {
 		maxLines: DEFAULT_MAX_LINES,
 		maxBytes: DEFAULT_MAX_BYTES,
@@ -208,7 +235,7 @@ export async function runHerdr(
 			code,
 			killed: result.killed,
 			truncated: truncation.truncated,
-			misleadingFailure: guidance !== null,
+			knownFailure: guidance !== null,
 		},
 		isError: failed,
 	};
