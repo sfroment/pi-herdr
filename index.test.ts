@@ -2,7 +2,10 @@ import {
 	assertSafeCommand,
 	buildArgv,
 	formatOutput,
-	misleadingFailureGuidance,
+	failureRecoveryGuidance,
+	normalizeTimeoutSeconds,
+	renderArgEntries,
+	renderResultText,
 	runHerdr,
 	HERDR_GUIDANCE,
 	type ExecResult,
@@ -181,6 +184,14 @@ describe("formatOutput", () => {
 	test("4. whitespace-only is treated as empty", () => {
 		expect(formatOutput("   \n  ", "  ")).toBe("(no output)");
 	});
+
+	test("5. empty stdout with single-char stderr still keeps the stderr label", () => {
+		expect(formatOutput("", "x")).toBe("stderr:\nx");
+	});
+
+	test("6. single-char stdout is kept, not treated as empty", () => {
+		expect(formatOutput("x", "")).toBe("x");
+	});
 });
 
 function makeFakeExec(result: ExecResult): HerdrExec & { calls: Parameters<HerdrExec>[] } {
@@ -193,38 +204,190 @@ function makeFakeExec(result: ExecResult): HerdrExec & { calls: Parameters<Herdr
 	return fn;
 }
 
-describe("misleadingFailureGuidance", () => {
+describe("failureRecoveryGuidance", () => {
+	// Minimal honest context: the seam's type requires every field.
+	function ctx(
+		output: string,
+		code: number | null,
+		overrides: { killed?: boolean; subcommand?: string } = {},
+	) {
+		return { output, code, killed: false, subcommand: "agent prompt reviewer hi", ...overrides };
+	}
+
 	test("agent_prompt_stalled output returns guidance", () => {
-		const g = misleadingFailureGuidance('{"code":"agent_prompt_stalled","error":"no observed working or blocked state within 5000 ms"}', 1);
+		const g = failureRecoveryGuidance(
+			ctx('{"code":"agent_prompt_stalled","error":"no observed working or blocked state within 5000 ms"}', 1),
+		);
 		expect(g).not.toBeNull();
 		expect(g).toContain("Do NOT re-send the prompt");
 		expect(g).toContain("agent list");
 	});
 
 	test("status timeout output returns guidance", () => {
-		const g = misleadingFailureGuidance("Error: timed out waiting for agent status", 1);
+		const g = failureRecoveryGuidance(ctx("Error: timed out waiting for agent status", 1));
 		expect(g).not.toBeNull();
 		expect(g).toContain("duplicate the task");
 	});
 
 	test("normal output returns null", () => {
-		expect(misleadingFailureGuidance('{"agents":[]}', 1)).toBeNull();
-		expect(misleadingFailureGuidance("", 1)).toBeNull();
+		expect(failureRecoveryGuidance(ctx('{"agents":[]}', 1))).toBeNull();
+		expect(failureRecoveryGuidance(ctx("", 1))).toBeNull();
 	});
 
 	test("stall phrase with exit code 0 returns null (success is never a failure)", () => {
 		const transcript = "agent read output: previous error agent_prompt_stalled was observed";
-		expect(misleadingFailureGuidance(transcript, 0)).toBeNull();
+		expect(failureRecoveryGuidance(ctx(transcript, 0))).toBeNull();
 	});
 
 	test("near-miss phrases do not match", () => {
-		expect(misleadingFailureGuidance("the build stalled", 1)).toBeNull();
-		expect(misleadingFailureGuidance("timed out waiting for pane output", 1)).toBeNull();
-		expect(misleadingFailureGuidance("agent prompt stalled (no underscore code)", 1)).toBeNull();
+		expect(failureRecoveryGuidance(ctx("the build stalled", 1))).toBeNull();
+		expect(failureRecoveryGuidance(ctx("timed out waiting for pane output", 1))).toBeNull();
+		expect(failureRecoveryGuidance(ctx("agent prompt stalled (no underscore code)", 1))).toBeNull();
 	});
 
 	test("unknown exit code returns null (conservative)", () => {
-		expect(misleadingFailureGuidance("Error: agent_prompt_stalled", null)).toBeNull();
+		expect(failureRecoveryGuidance(ctx("Error: agent_prompt_stalled", null))).toBeNull();
+	});
+
+	test("killed prompt/wait returns guidance (a kill bypasses the exit-code gate)", () => {
+		const g = failureRecoveryGuidance(ctx("", 0, { killed: true, subcommand: "agent wait reviewer" }));
+		expect(g).not.toBeNull();
+		expect(g).toContain("may still have been delivered");
+		expect(g).toContain("Do NOT re-send the prompt");
+	});
+
+	test("killed non-prompt command returns null", () => {
+		expect(failureRecoveryGuidance(ctx("", 0, { killed: true, subcommand: "pane read w1:p2" }))).toBeNull();
+	});
+
+	test("agent_pane_busy output returns retry guidance", () => {
+		const g = failureRecoveryGuidance(
+			ctx("Error: agent target pane w3:p3 is not an available shell", 1),
+		);
+		expect(g).not.toBeNull();
+		expect(g).toContain("not a real conflict");
+		expect(g).toContain("RETRY the identical command");
+	});
+
+	test("pane-busy machine code returns the same guidance", () => {
+		const g = failureRecoveryGuidance(ctx('{"code":"agent_pane_busy"}', 1));
+		expect(g).not.toBeNull();
+		expect(g).toContain("pane get");
+	});
+
+	test("near-miss pane phrases do not match", () => {
+		expect(failureRecoveryGuidance(ctx("the pane is not available for scheduling", 1))).toBeNull();
+		expect(failureRecoveryGuidance(ctx("agent pane busy (no underscore code)", 1))).toBeNull();
+	});
+
+	test("pane-busy phrase with exit code 0 returns null (success is never a failure)", () => {
+		expect(failureRecoveryGuidance(ctx("agent target pane w3:p3 is not an available shell", 0))).toBeNull();
+	});
+
+	test("unknown option failure returns flag-check guidance", () => {
+		const g = failureRecoveryGuidance(ctx("unknown option: --cwd", 2));
+		expect(g).not.toBeNull();
+		expect(g).toContain("--help");
+		expect(g).toContain("pane split");
+		expect(g).toContain("--cwd");
+	});
+
+	test("lossy unknown-option shape (value shown, flag lost) still gets guidance", () => {
+		expect(failureRecoveryGuidance(ctx("unknown option: /tmp", 2))).not.toBeNull();
+	});
+
+	test("near-miss option phrases do not match", () => {
+		expect(failureRecoveryGuidance(ctx("unknown optional feature enabled", 1))).toBeNull();
+	});
+
+	test("unknown-option phrase with exit code 0 returns null (success is never a failure)", () => {
+		expect(failureRecoveryGuidance(ctx("unknown option: --cwd", 0))).toBeNull();
+	});
+});
+
+describe("renderArgEntries", () => {
+	test("1. boolean true becomes a bare --flag", () => {
+		expect(renderArgEntries({ focus: true })).toEqual(["--focus"]);
+	});
+
+	test("2. boolean false is omitted", () => {
+		expect(renderArgEntries({ focus: false })).toEqual([]);
+	});
+
+	test("3. null and undefined values are omitted", () => {
+		expect(renderArgEntries({ a: null, b: undefined })).toEqual([]);
+	});
+
+	test("4. ---prefixed key is not double-prefixed", () => {
+		expect(renderArgEntries({ "--help": true })).toEqual(["--help"]);
+	});
+
+	test("5. array values become repeated --flag value pairs", () => {
+		expect(renderArgEntries({ kind: ["pi", "codex"] })).toEqual(["--kind", "pi", "--kind", "codex"]);
+	});
+
+	test("6. numbers render as strings", () => {
+		expect(renderArgEntries({ lines: 120 })).toEqual(["--lines", "120"]);
+	});
+
+	test("7. falsy-but-defined values (0, empty string) are kept as values", () => {
+		expect(renderArgEntries({ timeout: 0, label: "" })).toEqual(["--timeout", "0", "--label", ""]);
+	});
+});
+
+describe("normalizeTimeoutSeconds", () => {
+	test("1. defaults to 30 when undefined", () => {
+		expect(normalizeTimeoutSeconds(undefined)).toBe(30);
+	});
+
+	test("2. ms-shaped multiple of 1000 above the cap converts to seconds", () => {
+		expect(normalizeTimeoutSeconds(60000)).toBe(60);
+	});
+
+	test("3. 120000 ms coerces to the 120s cap", () => {
+		expect(normalizeTimeoutSeconds(120000)).toBe(120);
+	});
+
+	test("4. plain values above the cap clamp to 120 (not read as ms)", () => {
+		expect(normalizeTimeoutSeconds(150)).toBe(120);
+	});
+
+	test("5. sub-second values clamp up to 1", () => {
+		expect(normalizeTimeoutSeconds(0)).toBe(1);
+		expect(normalizeTimeoutSeconds(-5)).toBe(1);
+	});
+});
+
+describe("renderResultText", () => {
+	test("1. echoes command line, exit code, and output", () => {
+		const r = renderResultText(["agent", "list"], { output: "ok", code: 0, killed: false }, null);
+		expect(r.text).toContain("Command: herdr agent list");
+		expect(r.text).toContain("Exit code: 0");
+		expect(r.text).toContain("ok");
+		expect(r.truncated).toBe(false);
+	});
+
+	test("2. killed renders unknown exit code with (killed) marker", () => {
+		const r = renderResultText(["agent", "prompt"], { output: "", code: 0, killed: true }, null);
+		expect(r.text).toContain("Exit code: unknown (killed)");
+	});
+
+	test("3. null exit code (no kill) also renders unknown", () => {
+		const r = renderResultText(["agent", "list"], { output: "x", code: null, killed: false }, null);
+		expect(r.text).toContain("Exit code: unknown");
+		expect(r.text).not.toContain("(killed)");
+	});
+
+	test("4. guidance is appended after the output", () => {
+		const r = renderResultText(["agent", "list"], { output: "out", code: 1, killed: false }, "RECOVERY NOTE");
+		expect(r.text).toContain("out\n\nRECOVERY NOTE");
+	});
+
+	test("5. huge output is truncated and the note is appended", () => {
+		const huge = Array.from({ length: 5000 }, () => "line of content").join("\n");
+		const r = renderResultText(["agent", "list"], { output: huge, code: 0, killed: false }, null);
+		expect(r.truncated).toBe(true);
+		expect(r.text).toContain("Output truncated");
 	});
 });
 
@@ -318,11 +481,17 @@ describe("runHerdr", () => {
 		await expect(runHerdr({} as HerdrParams, exec)).rejects.toThrow(/subcommand/);
 	});
 
+	test("6b. whitespace-only subcommand throws the bare-herdr guard message", async () => {
+		const exec = makeFakeExec({ stdout: "", code: 0 });
+		await expect(runHerdr({ subcommand: "   " }, exec)).rejects.toThrow(/Do not run bare/);
+	});
+
 	test("7. HERDR_ENV not set returns isError with guidance", async () => {
 		delete process.env.HERDR_ENV;
 		const exec = makeFakeExec({ stdout: "", code: 0 });
 		const res = await runHerdr({ subcommand: "agent list" }, exec);
 		expect(res.isError).toBe(true);
+		expect(res.details).toMatchObject({ notInHerdr: true });
 		expect(res.content[0].text).toContain("Herdr");
 		expect(exec.calls).toHaveLength(0);
 	});
@@ -343,7 +512,7 @@ describe("runHerdr", () => {
 		});
 		const res = await runHerdr({ subcommand: "agent prompt reviewer do the thing" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details).toMatchObject({ misleadingFailure: true });
+		expect(res.details).toMatchObject({ knownFailure: true });
 		expect(res.content[0].text).toContain("Do NOT re-send the prompt");
 		expect(res.content[0].text).toContain("agent list");
 	});
@@ -355,7 +524,7 @@ describe("runHerdr", () => {
 		});
 		const res = await runHerdr({ subcommand: "agent prompt reviewer hi" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details).toMatchObject({ misleadingFailure: true });
+		expect(res.details).toMatchObject({ knownFailure: true });
 		expect(res.content[0].text).toContain("Verify the agent's real state");
 	});
 
@@ -363,7 +532,7 @@ describe("runHerdr", () => {
 		const exec = makeFakeExec({ stdout: "some other error", code: 1 });
 		const res = await runHerdr({ subcommand: "agent list" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details.misleadingFailure).toBe(false);
+		expect(res.details.knownFailure).toBe(false);
 		expect(res.content[0].text).not.toContain("Do NOT re-send the prompt");
 		expect(res.content[0].text).not.toContain("NOTE: this error does NOT mean");
 	});
@@ -375,7 +544,7 @@ describe("runHerdr", () => {
 		});
 		const res = await runHerdr({ subcommand: "agent read reviewer" }, exec);
 		expect(res.isError).toBe(false);
-		expect(res.details.misleadingFailure).toBe(false);
+		expect(res.details.knownFailure).toBe(false);
 		expect(res.content[0].text).not.toContain("NOTE: this error does NOT mean");
 	});
 
@@ -384,7 +553,7 @@ describe("runHerdr", () => {
 		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
 		const res = await runHerdr({ subcommand: "agent prompt reviewer do work" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details.misleadingFailure).toBe(true);
+		expect(res.details.knownFailure).toBe(true);
 		expect(res.content[0].text).toContain("Exit code: unknown (killed)");
 		expect(res.content[0].text).toContain("prompt may still have been delivered");
 	});
@@ -393,7 +562,7 @@ describe("runHerdr", () => {
 		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
 		const res = await runHerdr({ subcommand: "pane read w1:p2" }, exec);
 		expect(res.isError).toBe(true);
-		expect(res.details.misleadingFailure).toBe(false);
+		expect(res.details.knownFailure).toBe(false);
 	});
 
 	test("15. detection fires even when the phrase lands in the truncated-away region", async () => {
@@ -403,7 +572,7 @@ describe("runHerdr", () => {
 			+ Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n");
 		const exec = makeFakeExec({ stdout: huge, code: 1 });
 		const res = await runHerdr({ subcommand: "agent prompt reviewer hi" }, exec);
-		expect(res.details).toMatchObject({ truncated: true, misleadingFailure: true });
+		expect(res.details).toMatchObject({ truncated: true, knownFailure: true });
 		expect(res.content[0].text).not.toContain("at the very start");
 		expect(res.content[0].text).toContain("Do NOT re-send the prompt");
 	});
@@ -411,13 +580,40 @@ describe("runHerdr", () => {
 	test("16. killed prompt/wait with leading-whitespace subcommand still gets guidance", async () => {
 		const exec = makeFakeExec({ stdout: "", code: 0, killed: true });
 		const res = await runHerdr({ subcommand: "  agent prompt reviewer hi" }, exec);
-		expect(res.details.misleadingFailure).toBe(true);
+		expect(res.details.knownFailure).toBe(true);
 		expect(res.details.subcommand).toBe("agent prompt reviewer hi");
 		expect(exec.calls[0][1]).toEqual(["agent", "prompt", "reviewer", "hi"]);
 	});
 
 	test("17. buildArgv trims whitespace-padded subcommands", () => {
 		expect(buildArgv({ subcommand: "  agent list  " })).toEqual(["agent", "list"]);
+	});
+
+	test("18. agent_pane_busy failure appends pane-booting retry guidance", async () => {
+		const exec = makeFakeExec({
+			stderr: "Error: agent target pane w4:p9 is not an available shell",
+			code: 1,
+		});
+		const res = await runHerdr(
+			{ subcommand: "agent start", positional: ["lane1"], args: { kind: "pi", pane: "w4:p9" } },
+			exec,
+		);
+		expect(res.isError).toBe(true);
+		expect(res.details).toMatchObject({ knownFailure: true });
+		expect(res.content[0].text).toContain("not a real conflict");
+		expect(res.content[0].text).toContain("RETRY the identical command");
+	});
+
+	test("19. unknown-option failure (exit 2) appends --help and cwd guidance", async () => {
+		const exec = makeFakeExec({ stderr: "unknown option: --cwd", code: 2 });
+		const res = await runHerdr(
+			{ subcommand: "agent start", positional: ["reviewer"], args: { kind: "pi", pane: "w1:p2", cwd: "/tmp" } },
+			exec,
+		);
+		expect(res.isError).toBe(true);
+		expect(res.details).toMatchObject({ knownFailure: true });
+		expect(res.content[0].text).toContain("--help");
+		expect(res.content[0].text).toContain("has no `--cwd`");
 	});
 });
 

@@ -18,27 +18,37 @@ export type HerdrParams = {
 	forceDangerous?: boolean;
 };
 
+/**
+ * Render the args map as CLI flag tokens: booleans become bare flags, arrays
+ * become repeated --flag value pairs, false/null/undefined entries are omitted.
+ */
+export function renderArgEntries(
+	args: NonNullable<HerdrParams["args"]>,
+): string[] {
+	const segment: string[] = [];
+	for (const [key, value] of Object.entries(args)) {
+		if (value === false || value === null || value === undefined) continue;
+		const flag = key.startsWith("--") ? key : `--${key}`;
+		if (value === true) {
+			segment.push(flag);
+		} else if (Array.isArray(value)) {
+			for (const v of value) {
+				segment.push(flag, String(v));
+			}
+		} else {
+			segment.push(flag, String(value));
+		}
+	}
+	return segment;
+}
+
 export function buildArgv(params: HerdrParams): string[] {
 	const trimmed = params.subcommand.trim();
 	if (trimmed.length === 0) {
 		throw new Error("subcommand is required and must not be empty or whitespace");
 	}
 
-	const argv: string[] = trimmed.split(/\s+/);
-	const args = params.args ?? {};
-	for (const [key, value] of Object.entries(args)) {
-		if (value === false || value === null || value === undefined) continue;
-		const flag = key.startsWith("--") ? key : `--${key}`;
-		if (value === true) {
-			argv.push(flag);
-		} else if (Array.isArray(value)) {
-			for (const v of value) {
-				argv.push(flag, String(v));
-			}
-		} else {
-			argv.push(flag, String(value));
-		}
-	}
+	const argv: string[] = [...trimmed.split(/\s+/), ...renderArgEntries(params.args ?? {})];
 	// Positionals go last: herdr parses trailing positionals, and a variadic one
 	// (e.g. `tab rename <TAB_ID> <LABEL>...`) captures everything after it, so
 	// flags must not trail. Each element is exactly one argv argument — no
@@ -92,24 +102,116 @@ const PROMPT_FALSE_NEGATIVE = /agent_prompt_stalled|timed out waiting for agent 
 /** Subcommands whose wait/prompt semantics make a false negative plausible. */
 const PROMPT_SUBCOMMAND = /^agent\s+(prompt|wait)\b/i;
 
+/** Pane-booting busy: `agent start` into a freshly split pane before its shell is ready. */
+const PANE_BUSY = /agent_pane_busy|not an available shell/i;
+
+/** CLI syntax error: an unknown flag (herdr exits 2 for these). */
+const UNKNOWN_OPTION = /unknown option: -*\S+/i;
+
+const STALL_GUIDANCE =
+	"NOTE: this error does NOT mean the prompt failed — herdr often reports " +
+	"`agent_prompt_stalled` or a status timeout while the prompt was actually delivered. " +
+	"Do NOT re-send the prompt (it would duplicate the task). Verify the agent's real state " +
+	"with `agent list` / `agent read` first, and only re-prompt if the agent is idle and shows " +
+	"no sign of the task.";
+
+const KILLED_PROMPT_GUIDANCE =
+	"NOTE: the outer command timeout killed this call — the prompt may still have " +
+	"been delivered. Do NOT re-send the prompt (it would duplicate the task). Verify with " +
+	"`agent list` / `agent read` first; for long waits pass `--timeout <ms>` (≤ 120000) in args " +
+	"and raise `timeoutSeconds` toward its 120s max.";
+
+const PANE_BUSY_GUIDANCE =
+	"NOTE: the target pane was likely still booting — herdr reports this right after a " +
+	"pane split, before the pane's shell reaches its prompt (agent_pane_busy / 'not an " +
+	"available shell'). It is not a real conflict: wait a moment, verify the pane with " +
+	"`pane get` / `agent list`, and RETRY the identical command.";
+
+const UNKNOWN_OPTION_GUIDANCE =
+	"NOTE: this flag does not exist on the subcommand you ran — check its real options " +
+	"with `herdr <subcommand> --help`. Known instance: `agent start` has no `--cwd` — an " +
+	"agent's cwd comes from its PANE, set when the pane is created: pass `--cwd <dir>` to " +
+	"`pane split` or `workspace create`, not to `agent start`.";
+
 /**
- * Wrap known-misleading herdr failures with recovery guidance so the caller
- * does not re-prompt blindly. Returns null unless the command FAILED — a
- * successful output that merely echoes the phrase (e.g. a transcript read
- * while debugging this very extension) must not be misread as a failure.
+ * Known herdr failure shapes and their field-verified recoveries, one rule per
+ * shape. This table is the single place wrapper-vs-CLI quirk knowledge lives.
  */
-export function misleadingFailureGuidance(output: string, code: number | null | undefined): string | null {
-	if (code === 0 || code === null || code === undefined) return null;
-	if (!PROMPT_FALSE_NEGATIVE.test(output)) return null;
-	return (
-		"NOTE: this error does NOT mean the prompt failed — herdr often reports " +
-		"`agent_prompt_stalled` or a status timeout while the prompt was actually delivered. " +
-		"Do NOT re-send the prompt (it would duplicate the task). Verify the agent's real state " +
-		"with `agent list` / `agent read` first, and only re-prompt if the agent is idle and shows " +
-		"no sign of the task."
-	);
+const FAILURE_RULES: { pattern: RegExp; guidance: string }[] = [
+	{ pattern: PROMPT_FALSE_NEGATIVE, guidance: STALL_GUIDANCE },
+	{ pattern: PANE_BUSY, guidance: PANE_BUSY_GUIDANCE },
+	{ pattern: UNKNOWN_OPTION, guidance: UNKNOWN_OPTION_GUIDANCE },
+];
+
+/** The raw facts of one execution's outcome, shared by the guidance seam and the renderer. */
+export type ExecutionFacts = {
+	output: string;
+	code: number | null | undefined;
+	killed: boolean;
+};
+
+/** The guidance seam's input: the execution's facts plus the subcommand shape. */
+export type FailureContext = ExecutionFacts & {
+	subcommand: string;
+};
+
+/**
+ * Recovery guidance for known herdr failure shapes — misleading or not — so
+ * callers do not burn round-trips on blind retries or wrong workarounds.
+ * Returns null unless the command FAILED: a successful output that merely
+ * echoes a known phrase (e.g. a transcript read while debugging this very
+ * extension) must not be misread as a failure. A killed process never
+ * completed either — pi.exec coerces a kill's null exit code to 0, so the
+ * killed check bypasses the exit-code gate.
+ */
+export function failureRecoveryGuidance(ctx: FailureContext): string | null {
+	// Killed checked first: it is the outer truth — the call never completed —
+	// and pi.exec coerces its null exit code to 0, so the exit-code gate below
+	// would otherwise hide a killed prompt/wait entirely.
+	if (ctx.killed && PROMPT_SUBCOMMAND.test(ctx.subcommand)) return KILLED_PROMPT_GUIDANCE;
+	if (ctx.code === 0 || ctx.code === null || ctx.code === undefined) return null;
+	for (const rule of FAILURE_RULES) {
+		if (rule.pattern.test(ctx.output)) return rule.guidance;
+	}
+	return null;
 }
 
+/**
+ * Models echo herdr's CLI-style millisecond timeouts (--timeout 120000): a
+ * multiple of 1000 above the cap is read as ms, everything else clamps to
+ * the 1..120s range.
+ */
+export function normalizeTimeoutSeconds(input: number | undefined): number {
+	let seconds = input ?? 30;
+	if (seconds > 120 && seconds % 1000 === 0) seconds = seconds / 1000;
+	return Math.min(Math.max(seconds, 1), 120);
+}
+
+/**
+ * Render the unified tool output: command line, exit code, truncated output,
+ * truncation note, and recovery guidance. A killed result's exit code is a
+ * pi coercion artifact (null → 0) — rendered as unknown so the output never
+ * claims a clean exit for a kill.
+ */
+export function renderResultText(
+	argv: string[],
+	facts: ExecutionFacts,
+	guidance: string | null,
+): { text: string; truncated: boolean } {
+	const truncation = truncateTail(facts.output, {
+		maxLines: DEFAULT_MAX_LINES,
+		maxBytes: DEFAULT_MAX_BYTES,
+	});
+	const codeText = facts.killed || facts.code === null || facts.code === undefined ? "unknown" : String(facts.code);
+	let text = `Command: herdr ${argv.join(" ")}\nExit code: ${codeText}${facts.killed ? " (killed)" : ""}\n\n${truncation.content}`;
+	if (truncation.truncated) {
+		text += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
+	}
+	if (guidance) {
+		text += `\n\n${guidance}`;
+	}
+	return { text, truncated: truncation.truncated };
+}
 export type ExecResult = { stdout?: string; stderr?: string; code?: number | null; killed?: boolean };
 
 export type HerdrExec = (
@@ -150,11 +252,7 @@ export async function runHerdr(
 	assertSafeCommand(params);
 
 	const argv = buildArgv(params);
-	// Models echo herdr's CLI-style millisecond timeouts (--timeout 120000); a
-	// multiple of 1000 above the cap is read as ms, everything else clamps.
-	let timeoutSeconds = params.timeoutSeconds ?? 30;
-	if (timeoutSeconds > 120 && timeoutSeconds % 1000 === 0) timeoutSeconds = timeoutSeconds / 1000;
-	timeoutSeconds = Math.min(Math.max(timeoutSeconds, 1), 120);
+	const timeoutSeconds = normalizeTimeoutSeconds(params.timeoutSeconds);
 
 	let result: ExecResult;
 	try {
@@ -172,43 +270,23 @@ export async function runHerdr(
 	// A killed process never completed — pi.exec coerces a kill's null exit code
 	// to 0, so `code !== 0` alone would report a timeout-kill as success.
 	const failed = code !== 0 || result.killed === true;
-	// Gate on failure: a successful output that merely echoes the stall phrase
-	// (e.g. a transcript read) is NOT a misleading failure. Also treat an
-	// outer-exec kill on agent prompt/wait as the same class of false negative
-	// (the wait was cut short; the prompt may have been delivered anyway).
+	// Known failure shapes (misleading or not) carry their recovery text in one
+	// table behind failureRecoveryGuidance; the seam gates on failure so a
+	// success that merely echoes a known phrase is never misread.
 	const subcommand = params.subcommand.trim();
-	const guidance = misleadingFailureGuidance(output, code)
-		?? (result.killed && PROMPT_SUBCOMMAND.test(subcommand)
-			? "NOTE: the outer command timeout killed this call — the prompt may still have " +
-				"been delivered. Do NOT re-send the prompt (it would duplicate the task). Verify with " +
-				"`agent list` / `agent read` first; for long waits pass `--timeout <ms>` (≤ 120000) in args " +
-				"and raise `timeoutSeconds` toward its 120s max."
-			: null);
-	const truncation = truncateTail(output, {
-		maxLines: DEFAULT_MAX_LINES,
-		maxBytes: DEFAULT_MAX_BYTES,
-	});
-	const commandLine = `herdr ${argv.join(" ")}`;
-	// A killed result's exit code is a pi coercion artifact (null → 0) — render
-	// it as unknown so the output never claims a clean exit for a kill.
-	const codeText = result.killed || code === null || code === undefined ? "unknown" : String(code);
-	let text = `Command: ${commandLine}\nExit code: ${codeText}${result.killed ? " (killed)" : ""}\n\n${truncation.content}`;
-	if (truncation.truncated) {
-		text += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
-	}
-	if (guidance) {
-		text += `\n\n${guidance}`;
-	}
+	const facts: ExecutionFacts = { output, code, killed: result.killed === true };
+	const guidance = failureRecoveryGuidance({ ...facts, subcommand });
+	const rendered = renderResultText(argv, facts, guidance);
 
 	return {
-		content: [{ type: "text", text }],
+		content: [{ type: "text", text: rendered.text }],
 		details: {
 			subcommand,
 			argv,
 			code,
 			killed: result.killed,
-			truncated: truncation.truncated,
-			misleadingFailure: guidance !== null,
+			truncated: rendered.truncated,
+			knownFailure: guidance !== null,
 		},
 		isError: failed,
 	};
