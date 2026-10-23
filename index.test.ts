@@ -12,6 +12,10 @@ import {
 	type HerdrExec,
 	type HerdrParams,
 } from "./index.ts";
+import herdrExtension from "./index.ts";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
 describe("buildArgv", () => {
@@ -679,6 +683,204 @@ describe("runHerdr", () => {
 		expect(res.details).toMatchObject({ knownFailure: true });
 		expect(res.content[0].text).toContain("--help");
 		expect(res.content[0].text).toContain("has no `--cwd`");
+	});
+});
+
+describe("herdrExtension wiring", () => {
+	// The extension's live skill and bundled fallback live next to index.ts;
+	// the tests derive them the same way the extension derives its own paths.
+	const skillDir = join(dirname(fileURLToPath(import.meta.url)), "skill");
+	const liveSkillFile = join(skillDir, ".SKILL.live.md");
+	const bundledSkillFile = join(skillDir, "SKILL.md");
+
+	type WiredHandler = (event: any) => unknown;
+	type WiredTool = {
+		name: string;
+		label: string;
+		description: string;
+		parameters: { properties: { positional: { description: string }; timeoutSeconds: { minimum: number } } };
+		execute: (toolCallId: string, params: HerdrParams, signal?: AbortSignal) => Promise<unknown>;
+	};
+
+	/**
+	 * The second adapter over the extension's seam: pi's on/exec/registerTool
+	 * surface with exec canned, every handler registration and tool call
+	 * recorded. Tests fire the same events pi fires and assert what pi would
+	 * observe.
+	 */
+	function install(execResult: ExecResult | Error) {
+		const handlers = new Map<string, WiredHandler>();
+		const execCalls: { command: string; args: string[]; options: unknown }[] = [];
+		const tools: WiredTool[] = [];
+		const pi = {
+			on: (event: string, handler: WiredHandler) => {
+				handlers.set(event, handler);
+			},
+			exec: async (command: string, args: string[], options: unknown) => {
+				execCalls.push({ command, args, options });
+				if (execResult instanceof Error) throw execResult;
+				return execResult;
+			},
+			registerTool: (tool: WiredTool) => {
+				tools.push(tool);
+			},
+		};
+		herdrExtension(pi as unknown as Parameters<typeof herdrExtension>[0]);
+		return { handlers, execCalls, tools };
+	}
+
+	let originalHerdrEnv: string | undefined;
+	let liveExisted: boolean;
+	let liveContent: string;
+
+	beforeEach(() => {
+		originalHerdrEnv = process.env.HERDR_ENV;
+		liveExisted = existsSync(liveSkillFile);
+		liveContent = liveExisted ? readFileSync(liveSkillFile, "utf8") : "";
+		process.env.HERDR_ENV = "1";
+	});
+
+	afterEach(() => {
+		if (originalHerdrEnv === undefined) {
+			delete process.env.HERDR_ENV;
+		} else {
+			process.env.HERDR_ENV = originalHerdrEnv;
+		}
+		if (liveExisted) {
+			writeFileSync(liveSkillFile, liveContent);
+		} else {
+			rmSync(liveSkillFile, { force: true });
+		}
+	});
+
+	test("1. session_start inside herdr regenerates the live skill from `herdr --skill`", async () => {
+		const { handlers, execCalls } = install({ stdout: "  # regenerated live skill\n", code: 0 });
+		await handlers.get("session_start")!({ type: "session_start", reason: "startup" });
+		expect(execCalls).toHaveLength(1);
+		expect(execCalls[0].command).toBe("herdr");
+		expect(execCalls[0].args).toEqual(["--skill"]);
+		expect(execCalls[0].options).toEqual({ timeout: 5000 });
+		expect(readFileSync(liveSkillFile, "utf8")).toBe("# regenerated live skill");
+	});
+
+	test("2. session_start outside herdr never execs (no regen outside a managed pane)", async () => {
+		delete process.env.HERDR_ENV;
+		const { handlers, execCalls } = install({ stdout: "# live skill", code: 0 });
+		await handlers.get("session_start")!({ type: "session_start", reason: "startup" });
+		expect(execCalls).toHaveLength(0);
+		expect(existsSync(liveSkillFile)).toBe(liveExisted);
+	});
+
+	test("3. empty skill output leaves the existing live file untouched", async () => {
+		writeFileSync(liveSkillFile, "STALE LIVE SKILL");
+		const { handlers } = install({ stdout: "   \n  ", code: 0 });
+		await handlers.get("session_start")!({ type: "session_start", reason: "startup" });
+		expect(readFileSync(liveSkillFile, "utf8")).toBe("STALE LIVE SKILL");
+	});
+
+	test("4. exec failure is swallowed — the live file keeps its previous content", async () => {
+		writeFileSync(liveSkillFile, "PREVIOUS LIVE");
+		const { handlers, execCalls } = install(new Error("herdr not installed"));
+		await expect(
+			handlers.get("session_start")!({ type: "session_start", reason: "startup" }),
+		).resolves.toBeUndefined();
+		expect(execCalls).toHaveLength(1);
+		expect(readFileSync(liveSkillFile, "utf8")).toBe("PREVIOUS LIVE");
+	});
+
+	test("5. skillPaths prefers the live skill, bundled copy as the fallback", () => {
+		const { handlers } = install({ stdout: "", code: 0 });
+		const result = handlers.get("resources_discover")!({
+			type: "resources_discover",
+			cwd: "/tmp",
+			reason: "startup",
+		}) as { skillPaths: string[] };
+		expect(result.skillPaths).toEqual([liveSkillFile, bundledSkillFile]);
+	});
+
+	test("6. user prompt about herdr appends HERDR_GUIDANCE to the system prompt", () => {
+		const { handlers } = install({ stdout: "", code: 0 });
+		const result = handlers.get("before_agent_start")!({
+			type: "before_agent_start",
+			messageType: "user",
+			prompt: "how do I split a herdr pane to the right?",
+			systemPrompt: "BASE PROMPT",
+		}) as { systemPrompt: string };
+		expect(result.systemPrompt).toBe(`BASE PROMPT\n\n${HERDR_GUIDANCE}\n`);
+	});
+
+	test("7. user prompt about workspaces also passes the relevance gate", () => {
+		const { handlers } = install({ stdout: "", code: 0 });
+		const result = handlers.get("before_agent_start")!({
+			type: "before_agent_start",
+			messageType: "user",
+			prompt: "create a workspace for the api repo",
+			systemPrompt: "BASE PROMPT",
+		}) as { systemPrompt: string };
+		expect(result.systemPrompt).toContain(HERDR_GUIDANCE);
+	});
+
+	test("8. irrelevant user prompt returns undefined — no prompt mutation", () => {
+		const { handlers } = install({ stdout: "", code: 0 });
+		const result = handlers.get("before_agent_start")!({
+			type: "before_agent_start",
+			messageType: "user",
+			prompt: "fix the flaky retry test in the payments client",
+			systemPrompt: "BASE PROMPT",
+		});
+		expect(result).toBeUndefined();
+	});
+
+	test("9. custom-triggered turn gets no guidance (the gate is user-prompt-only)", () => {
+		const { handlers } = install({ stdout: "", code: 0 });
+		const result = handlers.get("before_agent_start")!({
+			type: "before_agent_start",
+			messageType: "custom",
+			message: { customType: "trigger", content: [{ type: "text", text: "go" }] },
+			systemPrompt: "BASE PROMPT",
+		});
+		expect(result).toBeUndefined();
+	});
+
+	test("10. registers the herdr tool under its label, model-facing description intact", () => {
+		const { tools } = install({ stdout: "[]", code: 0 });
+		expect(tools).toHaveLength(1);
+		expect(tools[0].name).toBe("herdr");
+		expect(tools[0].label).toBe("Herdr CLI");
+		// The description and the positional param doc are the model-facing text
+		// the wiring ships; a broken concat (NaN) would silently degrade the tool.
+		// The anchor must come from the FIRST fragment — text after a mutated
+		// concat operator re-attaches to the NaN and still matches.
+		expect(tools[0].description).toContain("Call the Herdr CLI");
+		expect(tools[0].parameters.properties.positional.description).toContain("one argv argument");
+		expect(tools[0].parameters.properties.timeoutSeconds.minimum).toBe(1);
+	});
+
+	test("11. tool execute delegates to runHerdr through pi.exec", async () => {
+		const { tools, execCalls } = install({ stdout: "agent-list-output", code: 0 });
+		const result = (await tools[0].execute("call-1", { subcommand: "agent list" }, undefined)) as {
+			isError: boolean;
+			content: { text: string }[];
+		};
+		expect(execCalls).toHaveLength(1);
+		expect(execCalls[0].command).toBe("herdr");
+		expect(execCalls[0].args).toEqual(["agent", "list"]);
+		expect(execCalls[0].options).toMatchObject({ timeout: 30000 });
+		expect(result.isError).toBe(false);
+		expect(result.content[0].text).toContain("Command: herdr agent list");
+		expect(result.content[0].text).toContain("agent-list-output");
+	});
+
+	test("12. tool execute surfaces the not-in-herdr error when HERDR_ENV is unset", async () => {
+		delete process.env.HERDR_ENV;
+		const { tools, execCalls } = install({ stdout: "[]", code: 0 });
+		const result = (await tools[0].execute("call-1", { subcommand: "agent list" }, undefined)) as {
+			isError: boolean;
+			details: Record<string, unknown>;
+		};
+		expect(result.isError).toBe(true);
+		expect(result.details).toMatchObject({ notInHerdr: true });
+		expect(execCalls).toHaveLength(0);
 	});
 });
 

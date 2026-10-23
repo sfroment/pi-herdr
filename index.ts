@@ -349,6 +349,10 @@ export default function herdrExtension(pi: ExtensionAPI) {
 	}));
 
 	pi.on("before_agent_start", (event) => {
+		// Only user prompts carry the text the gate reads; a custom-triggered
+		// turn (message, not prompt) must no-op by decision, not by RegExp
+		// coercing undefined. The guard also narrows the event union for `prompt`.
+		if (event.messageType !== "user") return;
 		if (!RELEVANT_PROMPT.test(event.prompt)) return;
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${HERDR_GUIDANCE}\n`,
