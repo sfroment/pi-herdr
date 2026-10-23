@@ -42,22 +42,35 @@ export function renderArgEntries(
 	return segment;
 }
 
+
+/**
+ * Subcommands whose positionals must PRECEDE the flags, against the
+ * positionals-last default. herdr's parser does not reorder a leading
+ * positional past flags when the subcommand also takes a trailing variadic
+ * one: `agent start <NAME> --kind pi` parses, while `agent start --kind pi
+ * <NAME>` draws the lossy `unknown option: pi` (exit 2 — the flag name is
+ * lost, the flag's value is shown). Field-verified on herdr 0.9.5.
+ */
+const POSITIONALS_BEFORE_FLAGS = [/^agent\s+start$/i];
+
 export function buildArgv(params: HerdrParams): string[] {
 	const trimmed = params.subcommand.trim();
 	if (trimmed.length === 0) {
 		throw new Error("subcommand is required and must not be empty or whitespace");
 	}
 
-	const argv: string[] = [...trimmed.split(/\s+/), ...renderArgEntries(params.args ?? {})];
-	// Positionals go last: herdr parses trailing positionals, and a variadic one
-	// (e.g. `tab rename <TAB_ID> <LABEL>...`) captures everything after it, so
-	// flags must not trail. Each element is exactly one argv argument — no
-	// shell, no quoting, no re-splitting.
-	for (const value of params.positional ?? []) {
-		argv.push(value);
+	const path = trimmed.split(/\s+/);
+	const flags = renderArgEntries(params.args ?? {});
+	const positional = params.positional ?? [];
+	// Positionals default to LAST: herdr parses trailing positionals, and a
+	// variadic one (e.g. `tab rename <TAB_ID> <LABEL>...`) captures everything
+	// after it, so flags must not trail. The table above names the subcommands
+	// whose positionals must lead instead. Each element is exactly one argv
+	// argument — no shell, no quoting, no re-splitting.
+	if (POSITIONALS_BEFORE_FLAGS.some((pattern) => pattern.test(trimmed))) {
+		return [...path, ...positional, ...flags];
 	}
-
-	return argv;
+	return [...path, ...flags, ...positional];
 }
 
 const DANGEROUS_COMMANDS = ["server stop"];
@@ -301,7 +314,7 @@ Requires \`HERDR_ENV=1\` — the tool only works inside a Herdr-managed pane.
 Key patterns:
 - List agents: \`subcommand: "agent list"\`.
 - Split a pane: \`subcommand: "pane split"\`, \`args: { "--current": true, direction: "right", "no-focus": true }\`.
-- Positional arguments (pane ids, agent names, prompt texts, labels): pass them as \`positional: ["w3:p3", 'pi "run the tests"']\` — each array element becomes exactly ONE argv argument, appended after all flags. NEVER put positional text in \`args\` (it would become a literal \`--flag\` typed into the pane) and never bake multi-word text into \`subcommand\` (it gets split on spaces).
+- Positional arguments (pane ids, agent names, prompt texts, labels): pass them as \`positional: ["w3:p3", 'pi "run the tests"']\` — each array element becomes exactly ONE argv argument. The tool places them where the CLI parses them: after flags for most subcommands, BEFORE flags for \`agent start\` (its NAME positional must lead). NEVER put positional text in \`args\` (it would become a literal \`--flag\` typed into the pane) and never bake multi-word text into \`subcommand\` (it gets split on spaces).
 - Start an agent: \`subcommand: "agent start"\`, \`positional: ["reviewer"]\`, \`args: { kind: "codex", pane: "w1:p2" }\`.
 - Prompt an agent: \`subcommand: "agent prompt"\`, \`positional: ["reviewer", "the prompt text"]\`. \`agent prompt\` may report \`agent_prompt_stalled\` and \`agent wait\` a status timeout while the prompt WAS delivered — NEVER blindly re-prompt (duplicates the task); verify with \`agent list\` / \`agent read\` first.
 - herdr's own \`--timeout\` flags are in MILLISECONDS (e.g. \`--timeout 100000\`, max 120000 to fit the tool's exec cap): the tool's \`timeoutSeconds\` caps the outer exec at 120s — for long waits pass a per-command \`--timeout\` in args and keep \`timeoutSeconds\` at max.
@@ -356,7 +369,7 @@ export default function herdrExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use the `herdr` tool when the user asks about Herdr — panes, workspaces, tabs, agents, or terminal layout. It calls the herdr CLI directly.",
 			"Pass the herdr subcommand as `subcommand` (e.g. 'agent list') and its flags as `args`. Booleans become bare flags, arrays become repeated flags.",
-			"Pass ordered positional arguments (pane ids, agent names, prompt texts, labels) as `positional: [\"w3:p3\", \"the text\"]` — each element is exactly one argv argument, appended after flags. Never put positional text in `args` (it becomes a literal flag) or in `subcommand` (multi-word text gets split).",
+			"Pass ordered positional arguments (pane ids, agent names, prompt texts, labels) as `positional: [\"w3:p3\", \"the text\"]` — each element is exactly one argv argument, placed where the CLI parses them (after flags for most subcommands, before flags for `agent start`). Never put positional text in `args` (it becomes a literal flag) or in `subcommand` (multi-word text gets split).",
 			"The `herdr` tool requires HERDR_ENV=1. If it reports not running inside Herdr, tell the user to run inside a Herdr-managed pane.",
 			"`agent prompt` may report `agent_prompt_stalled` and `agent wait` a status timeout while the prompt was actually delivered — verify with `agent list`/`agent read` before re-prompting; re-prompting duplicates the task.",
 			"herdr's `--timeout` flags are milliseconds (max 120000 to fit the exec cap); the tool's `timeoutSeconds` caps the exec at 120s — for long agent waits pass `--timeout <ms>` in args.",
@@ -381,9 +394,10 @@ export default function herdrExtension(pi: ExtensionAPI) {
 			positional: Type.Optional(
 				Type.Array(Type.String(), {
 					description:
-						"Ordered positional arguments, appended after all flags (e.g. [\"w3:p3\", 'pi \"run the tests\"'] for `pane send-text`). " +
+						"Ordered positional arguments (e.g. [\"w3:p3\", 'pi \"run the tests\"'] for `pane send-text`). " +
 						"Each element becomes exactly one argv argument — no shell, no quoting, no re-splitting. " +
-						"Use for commands like `agent prompt <name> <text>`, `pane send-text <id> <text>`, `pane read <id>`, `tab rename <id> <label>`.",
+						"Placed where the CLI parses them: after flags for most subcommands, before flags for `agent start` (its NAME must lead). " +
+						"Use for commands like `agent start <name>`, `agent prompt <name> <text>`, `pane send-text <id> <text>`, `tab rename <id> <label>`.",
 				}),
 			),
 			timeoutSeconds: Type.Optional(

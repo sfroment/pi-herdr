@@ -64,7 +64,7 @@ The `herdr` tool takes:
 | --- | --- | --- |
 | `subcommand` | string (required) | CLI subcommand, e.g. `agent list`, `pane split`, `workspace create`. Split on spaces into the command path. |
 | `args` | object | Key/value flags. Booleans become bare flags (`{"no-focus": true}` → `--no-focus`). Strings/numbers become `--flag value` pairs. Arrays become repeated `--flag value` pairs. Flags only — positional arguments go in `positional`. |
-| `positional` | string[] | Ordered positional arguments, appended after all flags. Each element becomes exactly one argv argument — no shell, no quoting, no re-splitting. |
+| `positional` | string[] | Ordered positional arguments. Each element becomes exactly one argv argument — no shell, no quoting, no re-splitting. Placed where the CLI parses them: after flags for most subcommands, before flags for `agent start` (its NAME must lead). |
 | `timeoutSeconds` | int | Default 30, max 120. |
 | `forceDangerous` | bool | Opt-in for destructive commands (`server stop`). Requires explicit user confirmation. |
 
