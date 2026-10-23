@@ -4,6 +4,7 @@ import {
 	formatOutput,
 	failureRecoveryGuidance,
 	normalizeTimeoutSeconds,
+	renderArgEntries,
 	renderResultText,
 	runHerdr,
 	HERDR_GUIDANCE,
@@ -298,7 +299,42 @@ describe("failureRecoveryGuidance", () => {
 	test("near-miss option phrases do not match", () => {
 		expect(failureRecoveryGuidance(ctx("unknown optional feature enabled", 1))).toBeNull();
 	});
+
+	test("unknown-option phrase with exit code 0 returns null (success is never a failure)", () => {
+		expect(failureRecoveryGuidance(ctx("unknown option: --cwd", 0))).toBeNull();
+	});
 });
+
+describe("renderArgEntries", () => {
+	test("1. boolean true becomes a bare --flag", () => {
+		expect(renderArgEntries({ focus: true })).toEqual(["--focus"]);
+	});
+
+	test("2. boolean false is omitted", () => {
+		expect(renderArgEntries({ focus: false })).toEqual([]);
+	});
+
+	test("3. null and undefined values are omitted", () => {
+		expect(renderArgEntries({ a: null, b: undefined })).toEqual([]);
+	});
+
+	test("4. ---prefixed key is not double-prefixed", () => {
+		expect(renderArgEntries({ "--help": true })).toEqual(["--help"]);
+	});
+
+	test("5. array values become repeated --flag value pairs", () => {
+		expect(renderArgEntries({ kind: ["pi", "codex"] })).toEqual(["--kind", "pi", "--kind", "codex"]);
+	});
+
+	test("6. numbers render as strings", () => {
+		expect(renderArgEntries({ lines: 120 })).toEqual(["--lines", "120"]);
+	});
+
+	test("7. falsy-but-defined values (0, empty string) are kept as values", () => {
+		expect(renderArgEntries({ timeout: 0, label: "" })).toEqual(["--timeout", "0", "--label", ""]);
+	});
+});
+
 describe("normalizeTimeoutSeconds", () => {
 	test("1. defaults to 30 when undefined", () => {
 		expect(normalizeTimeoutSeconds(undefined)).toBe(30);
@@ -324,7 +360,7 @@ describe("normalizeTimeoutSeconds", () => {
 
 describe("renderResultText", () => {
 	test("1. echoes command line, exit code, and output", () => {
-		const r = renderResultText(["agent", "list"], "ok", 0, false, null);
+		const r = renderResultText(["agent", "list"], { output: "ok", code: 0, killed: false }, null);
 		expect(r.text).toContain("Command: herdr agent list");
 		expect(r.text).toContain("Exit code: 0");
 		expect(r.text).toContain("ok");
@@ -332,28 +368,29 @@ describe("renderResultText", () => {
 	});
 
 	test("2. killed renders unknown exit code with (killed) marker", () => {
-		const r = renderResultText(["agent", "prompt"], "", 0, true, null);
+		const r = renderResultText(["agent", "prompt"], { output: "", code: 0, killed: true }, null);
 		expect(r.text).toContain("Exit code: unknown (killed)");
 	});
 
 	test("3. null exit code (no kill) also renders unknown", () => {
-		const r = renderResultText(["agent", "list"], "x", null, false, null);
+		const r = renderResultText(["agent", "list"], { output: "x", code: null, killed: false }, null);
 		expect(r.text).toContain("Exit code: unknown");
 		expect(r.text).not.toContain("(killed)");
 	});
 
 	test("4. guidance is appended after the output", () => {
-		const r = renderResultText(["agent", "list"], "out", 1, false, "RECOVERY NOTE");
+		const r = renderResultText(["agent", "list"], { output: "out", code: 1, killed: false }, "RECOVERY NOTE");
 		expect(r.text).toContain("out\n\nRECOVERY NOTE");
 	});
 
 	test("5. huge output is truncated and the note is appended", () => {
 		const huge = Array.from({ length: 5000 }, () => "line of content").join("\n");
-		const r = renderResultText(["agent", "list"], huge, 0, false, null);
+		const r = renderResultText(["agent", "list"], { output: huge, code: 0, killed: false }, null);
 		expect(r.truncated).toBe(true);
 		expect(r.text).toContain("Output truncated");
 	});
 });
+
 describe("runHerdr", () => {
 	let originalHerdrEnv: string | undefined;
 

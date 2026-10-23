@@ -48,8 +48,6 @@ export function buildArgv(params: HerdrParams): string[] {
 		throw new Error("subcommand is required and must not be empty or whitespace");
 	}
 
-	// The args map renders CLI-style: booleans become bare flags, arrays become
-	// repeated --flag value pairs, false/null/undefined are omitted.
 	const argv: string[] = [...trimmed.split(/\s+/), ...renderArgEntries(params.args ?? {})];
 	// Positionals go last: herdr parses trailing positionals, and a variadic one
 	// (e.g. `tab rename <TAB_ID> <LABEL>...`) captures everything after it, so
@@ -145,11 +143,15 @@ const FAILURE_RULES: { pattern: RegExp; guidance: string }[] = [
 	{ pattern: UNKNOWN_OPTION, guidance: UNKNOWN_OPTION_GUIDANCE },
 ];
 
-/** Everything the seam needs to classify one execution's outcome. */
-export type FailureContext = {
+/** The raw facts of one execution's outcome, shared by the guidance seam and the renderer. */
+export type ExecutionFacts = {
 	output: string;
 	code: number | null | undefined;
 	killed: boolean;
+};
+
+/** The guidance seam's input: the execution's facts plus the subcommand shape. */
+export type FailureContext = ExecutionFacts & {
 	subcommand: string;
 };
 
@@ -163,6 +165,9 @@ export type FailureContext = {
  * killed check bypasses the exit-code gate.
  */
 export function failureRecoveryGuidance(ctx: FailureContext): string | null {
+	// Killed checked first: it is the outer truth — the call never completed —
+	// and pi.exec coerces its null exit code to 0, so the exit-code gate below
+	// would otherwise hide a killed prompt/wait entirely.
 	if (ctx.killed && PROMPT_SUBCOMMAND.test(ctx.subcommand)) return KILLED_PROMPT_GUIDANCE;
 	if (ctx.code === 0 || ctx.code === null || ctx.code === undefined) return null;
 	for (const rule of FAILURE_RULES) {
@@ -190,17 +195,15 @@ export function normalizeTimeoutSeconds(input: number | undefined): number {
  */
 export function renderResultText(
 	argv: string[],
-	output: string,
-	code: number | null | undefined,
-	killed: boolean,
+	facts: ExecutionFacts,
 	guidance: string | null,
 ): { text: string; truncated: boolean } {
-	const truncation = truncateTail(output, {
+	const truncation = truncateTail(facts.output, {
 		maxLines: DEFAULT_MAX_LINES,
 		maxBytes: DEFAULT_MAX_BYTES,
 	});
-	const codeText = killed || code === null || code === undefined ? "unknown" : String(code);
-	let text = `Command: herdr ${argv.join(" ")}\nExit code: ${codeText}${killed ? " (killed)" : ""}\n\n${truncation.content}`;
+	const codeText = facts.killed || facts.code === null || facts.code === undefined ? "unknown" : String(facts.code);
+	let text = `Command: herdr ${argv.join(" ")}\nExit code: ${codeText}${facts.killed ? " (killed)" : ""}\n\n${truncation.content}`;
 	if (truncation.truncated) {
 		text += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).]`;
 	}
@@ -271,13 +274,9 @@ export async function runHerdr(
 	// table behind failureRecoveryGuidance; the seam gates on failure so a
 	// success that merely echoes a known phrase is never misread.
 	const subcommand = params.subcommand.trim();
-	const guidance = failureRecoveryGuidance({
-		output,
-		code,
-		killed: result.killed === true,
-		subcommand,
-	});
-	const rendered = renderResultText(argv, output, code, result.killed === true, guidance);
+	const facts: ExecutionFacts = { output, code, killed: result.killed === true };
+	const guidance = failureRecoveryGuidance({ ...facts, subcommand });
+	const rendered = renderResultText(argv, facts, guidance);
 
 	return {
 		content: [{ type: "text", text: rendered.text }],
