@@ -92,6 +92,12 @@ const PROMPT_FALSE_NEGATIVE = /agent_prompt_stalled|timed out waiting for agent 
 /** Subcommands whose wait/prompt semantics make a false negative plausible. */
 const PROMPT_SUBCOMMAND = /^agent\s+(prompt|wait)\b/i;
 
+/** Pane-booting busy: `agent start` into a freshly split pane before its shell is ready. */
+const PANE_BUSY = /agent_pane_busy|not an available shell/i;
+
+/** CLI syntax error: an unknown flag (herdr exits 2 for these). */
+const UNKNOWN_OPTION = /unknown option: -*\S+/i;
+
 const STALL_GUIDANCE =
 	"NOTE: this error does NOT mean the prompt failed — herdr often reports " +
 	"`agent_prompt_stalled` or a status timeout while the prompt was actually delivered. " +
@@ -105,12 +111,26 @@ const KILLED_PROMPT_GUIDANCE =
 	"`agent list` / `agent read` first; for long waits pass `--timeout <ms>` (≤ 120000) in args " +
 	"and raise `timeoutSeconds` toward its 120s max.";
 
+const PANE_BUSY_GUIDANCE =
+	"NOTE: the target pane was likely still booting — herdr reports this right after a " +
+	"pane split, before the pane's shell reaches its prompt (agent_pane_busy / 'not an " +
+	"available shell'). It is not a real conflict: wait a moment, verify the pane with " +
+	"`pane get` / `agent list`, and RETRY the identical command.";
+
+const UNKNOWN_OPTION_GUIDANCE =
+	"NOTE: this flag does not exist on the subcommand you ran — check its real options " +
+	"with `herdr <subcommand> --help`. Known instance: `agent start` has no `--cwd` — an " +
+	"agent's cwd comes from its PANE, set when the pane is created: pass `--cwd <dir>` to " +
+	"`pane split` or `workspace create`, not to `agent start`.";
+
 /**
  * Known herdr failure shapes and their field-verified recoveries, one rule per
  * shape. This table is the single place wrapper-vs-CLI quirk knowledge lives.
  */
 const FAILURE_RULES: { pattern: RegExp; guidance: string }[] = [
 	{ pattern: PROMPT_FALSE_NEGATIVE, guidance: STALL_GUIDANCE },
+	{ pattern: PANE_BUSY, guidance: PANE_BUSY_GUIDANCE },
+	{ pattern: UNKNOWN_OPTION, guidance: UNKNOWN_OPTION_GUIDANCE },
 ];
 
 /** Everything the seam needs to classify one execution's outcome. */

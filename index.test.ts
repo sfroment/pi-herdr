@@ -248,6 +248,46 @@ describe("failureRecoveryGuidance", () => {
 	test("killed non-prompt command returns null", () => {
 		expect(failureRecoveryGuidance(ctx("", 0, { killed: true, subcommand: "pane read w1:p2" }))).toBeNull();
 	});
+
+	test("agent_pane_busy output returns retry guidance", () => {
+		const g = failureRecoveryGuidance(
+			ctx("Error: agent target pane w3:p3 is not an available shell", 1),
+		);
+		expect(g).not.toBeNull();
+		expect(g).toContain("not a real conflict");
+		expect(g).toContain("RETRY the identical command");
+	});
+
+	test("pane-busy machine code returns the same guidance", () => {
+		const g = failureRecoveryGuidance(ctx('{"code":"agent_pane_busy"}', 1));
+		expect(g).not.toBeNull();
+		expect(g).toContain("pane get");
+	});
+
+	test("near-miss pane phrases do not match", () => {
+		expect(failureRecoveryGuidance(ctx("the pane is not available for scheduling", 1))).toBeNull();
+		expect(failureRecoveryGuidance(ctx("agent pane busy (no underscore code)", 1))).toBeNull();
+	});
+
+	test("pane-busy phrase with exit code 0 returns null (success is never a failure)", () => {
+		expect(failureRecoveryGuidance(ctx("agent target pane w3:p3 is not an available shell", 0))).toBeNull();
+	});
+
+	test("unknown option failure returns flag-check guidance", () => {
+		const g = failureRecoveryGuidance(ctx("unknown option: --cwd", 2));
+		expect(g).not.toBeNull();
+		expect(g).toContain("--help");
+		expect(g).toContain("pane split");
+		expect(g).toContain("--cwd");
+	});
+
+	test("lossy unknown-option shape (value shown, flag lost) still gets guidance", () => {
+		expect(failureRecoveryGuidance(ctx("unknown option: /tmp", 2))).not.toBeNull();
+	});
+
+	test("near-miss option phrases do not match", () => {
+		expect(failureRecoveryGuidance(ctx("unknown optional feature enabled", 1))).toBeNull();
+	});
 });
 describe("runHerdr", () => {
 	let originalHerdrEnv: string | undefined;
@@ -439,6 +479,33 @@ describe("runHerdr", () => {
 
 	test("17. buildArgv trims whitespace-padded subcommands", () => {
 		expect(buildArgv({ subcommand: "  agent list  " })).toEqual(["agent", "list"]);
+	});
+
+	test("18. agent_pane_busy failure appends pane-booting retry guidance", async () => {
+		const exec = makeFakeExec({
+			stderr: "Error: agent target pane w4:p9 is not an available shell",
+			code: 1,
+		});
+		const res = await runHerdr(
+			{ subcommand: "agent start", positional: ["lane1"], args: { kind: "pi", pane: "w4:p9" } },
+			exec,
+		);
+		expect(res.isError).toBe(true);
+		expect(res.details).toMatchObject({ knownFailure: true });
+		expect(res.content[0].text).toContain("not a real conflict");
+		expect(res.content[0].text).toContain("RETRY the identical command");
+	});
+
+	test("19. unknown-option failure (exit 2) appends --help and cwd guidance", async () => {
+		const exec = makeFakeExec({ stderr: "unknown option: --cwd", code: 2 });
+		const res = await runHerdr(
+			{ subcommand: "agent start", positional: ["reviewer"], args: { kind: "pi", pane: "w1:p2", cwd: "/tmp" } },
+			exec,
+		);
+		expect(res.isError).toBe(true);
+		expect(res.details).toMatchObject({ knownFailure: true });
+		expect(res.content[0].text).toContain("--help");
+		expect(res.content[0].text).toContain("has no `--cwd`");
 	});
 });
 
