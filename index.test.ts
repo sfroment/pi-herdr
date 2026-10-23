@@ -183,6 +183,14 @@ describe("formatOutput", () => {
 	test("4. whitespace-only is treated as empty", () => {
 		expect(formatOutput("   \n  ", "  ")).toBe("(no output)");
 	});
+
+	test("5. empty stdout with single-char stderr still keeps the stderr label", () => {
+		expect(formatOutput("", "x")).toBe("stderr:\nx");
+	});
+
+	test("6. single-char stdout is kept, not treated as empty", () => {
+		expect(formatOutput("x", "")).toBe("x");
+	});
 });
 
 function makeFakeExec(result: ExecResult): HerdrExec & { calls: Parameters<HerdrExec>[] } {
@@ -436,11 +444,17 @@ describe("runHerdr", () => {
 		await expect(runHerdr({} as HerdrParams, exec)).rejects.toThrow(/subcommand/);
 	});
 
+	test("6b. whitespace-only subcommand throws the bare-herdr guard message", async () => {
+		const exec = makeFakeExec({ stdout: "", code: 0 });
+		await expect(runHerdr({ subcommand: "   " }, exec)).rejects.toThrow(/Do not run bare/);
+	});
+
 	test("7. HERDR_ENV not set returns isError with guidance", async () => {
 		delete process.env.HERDR_ENV;
 		const exec = makeFakeExec({ stdout: "", code: 0 });
 		const res = await runHerdr({ subcommand: "agent list" }, exec);
 		expect(res.isError).toBe(true);
+		expect(res.details).toMatchObject({ notInHerdr: true });
 		expect(res.content[0].text).toContain("Herdr");
 		expect(exec.calls).toHaveLength(0);
 	});
