@@ -53,7 +53,14 @@ export function buildArgv(params: HerdrParams): string[] {
 const DANGEROUS_COMMANDS = ["server stop"];
 
 export function assertSafeCommand(params: HerdrParams): void {
-	const words = params.subcommand.trim().toLowerCase().split(/\s+/);
+	// Positionals join the pair-scan: clap reorders flags around positionals, so
+	// scanning the path alone would let `subcommand: "server", positional: ["stop"]`
+	// reach the unrecoverable command. Each positional stays ONE word here — a
+	// multi-word payload never forms a dangerous pair (it is one argv element).
+	const words = [
+		...params.subcommand.trim().toLowerCase().split(/\s+/),
+		...(params.positional ?? []).map((word) => word.toLowerCase()),
+	];
 	for (let i = 0; i < words.length - 1; i++) {
 		const pair = `${words[i]} ${words[i + 1]}`;
 		if (DANGEROUS_COMMANDS.includes(pair)) {
@@ -217,7 +224,7 @@ Key patterns:
 - List agents: \`subcommand: "agent list"\`.
 - Split a pane: \`subcommand: "pane split"\`, \`args: { "--current": true, direction: "right", "no-focus": true }\`.
 - Positional arguments (pane ids, agent names, prompt texts, labels): pass them as \`positional: ["w3:p3", 'pi "run the tests"']\` — each array element becomes exactly ONE argv argument, appended after all flags. NEVER put positional text in \`args\` (it would become a literal \`--flag\` typed into the pane) and never bake multi-word text into \`subcommand\` (it gets split on spaces).
-- Start an agent: \`subcommand: "agent start reviewer"\`, \`args: { kind: "codex", pane: "w1:p2" }\`. The agent NAME is positional in the subcommand.
+- Start an agent: \`subcommand: "agent start"\`, \`positional: ["reviewer"]\`, \`args: { kind: "codex", pane: "w1:p2" }\`.
 - Prompt an agent: \`subcommand: "agent prompt"\`, \`positional: ["reviewer", "the prompt text"]\`. \`agent prompt\` may report \`agent_prompt_stalled\` and \`agent wait\` a status timeout while the prompt WAS delivered — NEVER blindly re-prompt (duplicates the task); verify with \`agent list\` / \`agent read\` first.
 - herdr's own \`--timeout\` flags are in MILLISECONDS (e.g. \`--timeout 100000\`, max 120000 to fit the tool's exec cap): the tool's \`timeoutSeconds\` caps the outer exec at 120s — for long waits pass a per-command \`--timeout\` in args and keep \`timeoutSeconds\` at max.
 - \`server stop\` requires \`forceDangerous: true\` and explicit user confirmation.

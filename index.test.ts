@@ -132,6 +132,37 @@ describe("assertSafeCommand", () => {
 			assertSafeCommand({ subcommand: "agent start reviewer" }),
 		).not.toThrow();
 	});
+
+	test("9. dangerous command smuggled through positional is caught", () => {
+		expect(() => assertSafeCommand({ subcommand: "server", positional: ["stop"] })).toThrow(
+			/server stop/,
+		);
+	});
+
+	test("10. positional-smuggled server stop with forceDangerous is allowed", () => {
+		expect(() =>
+			assertSafeCommand({ subcommand: "server", positional: ["stop"], forceDangerous: true }),
+		).not.toThrow();
+	});
+
+	test("11. flags between path and positional cannot smuggle server stop", () => {
+		expect(() =>
+			assertSafeCommand({
+				subcommand: "server",
+				args: { wait: true },
+				positional: ["stop"],
+			})
+		).toThrow(/server stop/);
+	});
+
+	test("12. multi-word payload as ONE positional does not false-positive", () => {
+		expect(() =>
+			assertSafeCommand({
+				subcommand: "pane send-text",
+				positional: ["w1:p1", "server stop"],
+			})
+		).not.toThrow();
+	});
 });
 
 describe("formatOutput", () => {

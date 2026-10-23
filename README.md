@@ -78,16 +78,19 @@ The `herdr` tool takes:
 { "subcommand": "pane split", "args": { "--current": true, direction: "right", "no-focus": true } }
 
 // start a codex agent named "reviewer" in a pane
-{ "subcommand": "agent start reviewer", "args": { kind: "codex", pane: "w1:p2" } }
+{ "subcommand": "agent start", "positional": ["reviewer"], "args": { kind: "codex", pane: "w1:p2" } }
 
 // read recent output from a pane
-{ "subcommand": "pane read w1:p1", "args": { source: "recent-unwrapped", lines: 120 } }
+{ "subcommand": "pane read", "positional": ["w1:p1"], "args": { source: "recent-unwrapped", lines: 120 } }
 
 // send literal text to a pane — positionals, one argv element each
 { "subcommand": "pane send-text", "positional": ["w1:p2", "echo hello"] }
 
 // prompt an agent with a multi-word brief
 { "subcommand": "agent prompt", "positional": ["reviewer", "run the tests and report"] }
+
+// rename a tab
+{ "subcommand": "tab rename", "positional": ["w2:t1", "review lane"] }
 ```
 
 ## Develop
